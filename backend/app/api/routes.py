@@ -30,7 +30,8 @@ _current_job_id: Optional[str] = None
 # ============================
 
 class ScraperRunRequest(BaseModel):
-    target_date: Optional[str] = None
+    start_date: Optional[str] = None  # YYYY-MM-DD
+    end_date: Optional[str] = None    # YYYY-MM-DD (defaults to start_date)
 
 
 class ScraperStatusResponse(BaseModel):
@@ -84,15 +85,25 @@ async def run_scraper(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Trigger a manual scraper run"""
+    """
+    Trigger a manual scraper run
+    
+    Args:
+        start_date: Start of date range (YYYY-MM-DD), defaults to yesterday
+        end_date: End of date range (YYYY-MM-DD), defaults to start_date
+    """
     global _scraper_instance, _current_job_id
     
     if _scraper_instance and _scraper_instance.progress.is_running:
         raise HTTPException(400, "Scraper is already running")
     
+    # Default dates
+    start = request.start_date or datetime.now().strftime("%Y-%m-%d")
+    end = request.end_date or start
+    
     # Create job record
     job = ScraperJob(
-        target_date=request.target_date or datetime.now().strftime("%Y-%m-%d"),
+        target_date=f"{start} to {end}",
         status="RUNNING"
     )
     db.add(job)
@@ -105,14 +116,15 @@ async def run_scraper(
     background_tasks.add_task(
         _run_scraper_task,
         str(job.id),
-        request.target_date
+        start,
+        end
     )
     
-    return {"job_id": str(job.id), "status": "started"}
+    return {"job_id": str(job.id), "status": "started", "date_range": f"{start} to {end}"}
 
 
-async def _run_scraper_task(job_id: str, target_date: Optional[str]):
-    """Background task to run scraper"""
+async def _run_scraper_task(job_id: str, start_date: str, end_date: str):
+    """Background task to run scraper with date range"""
     global _scraper_instance
     
     from app.core.database import SessionLocal
@@ -131,7 +143,7 @@ async def _run_scraper_task(job_id: str, target_date: Optional[str]):
             db.commit()
         
         _scraper_instance = TenderScraper(on_progress=on_progress)
-        results = await _scraper_instance.run(target_date)
+        results = await _scraper_instance.run(start_date, end_date)
         
         # Process downloads
         extracted_count = 0

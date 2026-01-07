@@ -20,8 +20,8 @@ export function useTriggerScraper() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async (targetDate?: string) => {
-      const result = await api.triggerScraper(targetDate);
+    mutationFn: async ({ startDate, endDate }: { startDate?: string; endDate?: string }) => {
+      const result = await api.triggerScraper(startDate, endDate);
       if (!result.success) {
         throw new Error(result.error);
       }

@@ -54,13 +54,14 @@ class TenderApiClient {
   // ============================
 
   /**
-   * Trigger manual scraper run
-   * @param targetDate - Date to scrape (YYYY-MM-DD), defaults to yesterday
+   * Trigger manual scraper run with date range
+   * @param startDate - Start date (YYYY-MM-DD), defaults to yesterday
+   * @param endDate - End date (YYYY-MM-DD), defaults to startDate
    */
-  async triggerScraper(targetDate?: string): Promise<ApiResponse<{ job_id: string }>> {
+  async triggerScraper(startDate?: string, endDate?: string): Promise<ApiResponse<{ job_id: string; date_range: string }>> {
     return this.request('/api/scraper/run', {
       method: 'POST',
-      body: JSON.stringify({ target_date: targetDate }),
+      body: JSON.stringify({ start_date: startDate, end_date: endDate }),
     });
   }
 

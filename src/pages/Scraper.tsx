@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, Square, Calendar, Clock, Download, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Play, Square, Calendar, Clock, Download, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { StatCard } from '@/components/dashboard/StatCard';
 import { Terminal } from '@/components/dashboard/Terminal';
@@ -18,7 +18,13 @@ interface LogEntry {
 }
 
 export default function Scraper() {
-  const [targetDate, setTargetDate] = useState(() => {
+  // Date range state
+  const [startDate, setStartDate] = useState(() => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    return yesterday.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(() => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     return yesterday.toISOString().split('T')[0];
@@ -29,12 +35,12 @@ export default function Scraper() {
       id: '1',
       timestamp: new Date().toLocaleTimeString('en-GB'),
       level: 'info',
-      message: 'Scraper ready. Click "Run Scraper" to start.',
+      message: 'Scraper ready. Select date range and click "Run Scraper" to start.',
     },
   ]);
 
   const { data: isBackendOnline } = useBackendHealth();
-  const { data: scraperStatus, isLoading: statusLoading } = useScraperStatus();
+  const { data: scraperStatus } = useScraperStatus();
   const triggerScraper = useTriggerScraper();
   const stopScraper = useStopScraper();
 
@@ -50,7 +56,6 @@ export default function Scraper() {
         message: log.message,
       }));
       setLogs(prev => {
-        // Only add new logs
         const existingMessages = new Set(prev.map(l => l.message));
         const unique = newLogs.filter(l => !existingMessages.has(l.message));
         return [...prev, ...unique];
@@ -72,12 +77,13 @@ export default function Scraper() {
     if (isRunning) return;
     
     setLogs([]);
-    addLog('info', `Starting scraper for date: ${targetDate}`);
+    addLog('info', `Starting scraper...`);
+    addLog('info', `Date de mise en ligne: ${formatDate(startDate)} → ${formatDate(endDate)}`);
     addLog('info', 'Category filter: Fournitures (2)');
     
     try {
-      await triggerScraper.mutateAsync(targetDate);
-      addLog('success', 'Scraper job submitted successfully');
+      const result = await triggerScraper.mutateAsync({ startDate, endDate });
+      addLog('success', `Scraper job submitted: ${result?.date_range || ''}`);
       toast.success('Scraper started');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -149,24 +155,56 @@ export default function Scraper() {
         <div className="grid md:grid-cols-2 gap-6">
           {/* Configuration */}
           <div className="data-card space-y-4">
-            <h2 className="font-medium">Configuration</h2>
+            <h2 className="font-medium">Configuration — Date de mise en ligne</h2>
             
-            <div className="space-y-2">
-              <Label htmlFor="targetDate">Target Date (Mise en ligne)</Label>
-              <div className="relative">
-                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input
-                  id="targetDate"
-                  type="date"
-                  value={targetDate}
-                  onChange={(e) => setTargetDate(e.target.value)}
-                  className="pl-10"
-                  disabled={isRunning}
-                />
+            {/* Date Range Inputs */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="startDate">Start Date</Label>
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <Input
+                    id="startDate"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => {
+                      setStartDate(e.target.value);
+                      // Auto-update end date if it's before start
+                      if (e.target.value > endDate) {
+                        setEndDate(e.target.value);
+                      }
+                    }}
+                    className="pl-10"
+                    disabled={isRunning}
+                  />
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Downloads tenders published on this date ({formatDate(targetDate)})
-              </p>
+              
+              <div className="space-y-2">
+                <Label htmlFor="endDate">End Date</Label>
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <Input
+                    id="endDate"
+                    type="date"
+                    value={endDate}
+                    min={startDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="pl-10"
+                    disabled={isRunning}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Date Preview */}
+            <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 p-3 rounded-md">
+              <span className="font-mono">{formatDate(startDate)}</span>
+              <ArrowRight className="w-4 h-4" />
+              <span className="font-mono">{formatDate(endDate)}</span>
+              <span className="ml-auto text-xs">
+                {startDate === endDate ? '(1 day)' : `(${Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 1} days)`}
+              </span>
             </div>
 
             <div className="pt-2 flex gap-3">
