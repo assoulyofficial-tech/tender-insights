@@ -3,10 +3,20 @@ Tender AI Platform - FastAPI Entry Point
 Run with: uvicorn main:app --reload --port 8000
 """
 
+import sys
+import asyncio
+
+# Windows fix: Playwright requires ProactorEventLoop for subprocess support
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-import sys
+
+from app.core.config import settings
+from app.core.database import init_db
+from app.api.routes import router
 
 from app.core.config import settings
 from app.core.database import init_db
