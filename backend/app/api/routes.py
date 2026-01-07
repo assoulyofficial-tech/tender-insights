@@ -3,6 +3,9 @@ Tender AI Platform - API Routes
 FastAPI endpoints for frontend integration
 """
 
+import asyncio
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -10,7 +13,6 @@ from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel
 from uuid import UUID
-import asyncio
 
 from app.core.database import get_db
 from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType
@@ -112,19 +114,41 @@ async def run_scraper(
     
     _current_job_id = str(job.id)
     
-    # Run scraper in background
-    background_tasks.add_task(
-        _run_scraper_task,
-        str(job.id),
-        start,
-        end
+    # Run scraper in a separate thread (required for Playwright on Windows)
+    import threading
+    scraper_thread = threading.Thread(
+        target=_run_scraper_sync,
+        args=(str(job.id), start, end),
+        daemon=True
     )
+    scraper_thread.start()
     
     return {"job_id": str(job.id), "status": "started", "date_range": f"{start} to {end}"}
 
 
-async def _run_scraper_task(job_id: str, start_date: str, end_date: str):
-    """Background task to run scraper with date range"""
+def _run_scraper_sync(job_id: str, start_date: str, end_date: str):
+    """
+    Run scraper in a separate thread with its own event loop.
+    This is required on Windows because Playwright needs ProactorEventLoop
+    but uvicorn uses SelectorEventLoop.
+    """
+    global _scraper_instance
+    
+    # Create a new event loop for this thread (with ProactorEventLoop on Windows)
+    if sys.platform == "win32":
+        loop = asyncio.ProactorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(_run_scraper_async(job_id, start_date, end_date))
+    finally:
+        loop.close()
+
+
+async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
+    """Async scraper logic"""
     global _scraper_instance
     
     from app.core.database import SessionLocal
