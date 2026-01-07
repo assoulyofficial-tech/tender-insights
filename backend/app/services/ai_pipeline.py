@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Tender AI Platform - AI Pipeline Service
 DeepSeek integration for metadata extraction
