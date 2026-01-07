@@ -1,11 +1,14 @@
-import { useState } from 'react';
-import { Play, Square, Calendar, Clock, Download, AlertCircle } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Play, Square, Calendar, Clock, Download, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { StatCard } from '@/components/dashboard/StatCard';
 import { Terminal } from '@/components/dashboard/Terminal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useScraperStatus, useTriggerScraper, useStopScraper } from '@/hooks/useScraper';
+import { useBackendHealth } from '@/hooks/useTenders';
+import { toast } from 'sonner';
 
 interface LogEntry {
   id: string;
@@ -15,28 +18,45 @@ interface LogEntry {
 }
 
 export default function Scraper() {
-  const [isRunning, setIsRunning] = useState(false);
   const [targetDate, setTargetDate] = useState(() => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     return yesterday.toISOString().split('T')[0];
   });
   
-  const [stats, setStats] = useState({
-    total: 0,
-    downloaded: 0,
-    failed: 0,
-    elapsed: 0,
-  });
-
   const [logs, setLogs] = useState<LogEntry[]>([
     {
       id: '1',
-      timestamp: '10:30:00',
+      timestamp: new Date().toLocaleTimeString('en-GB'),
       level: 'info',
       message: 'Scraper ready. Click "Run Scraper" to start.',
     },
   ]);
+
+  const { data: isBackendOnline } = useBackendHealth();
+  const { data: scraperStatus, isLoading: statusLoading } = useScraperStatus();
+  const triggerScraper = useTriggerScraper();
+  const stopScraper = useStopScraper();
+
+  const isRunning = scraperStatus?.is_running || false;
+
+  // Update logs based on scraper status
+  useEffect(() => {
+    if (scraperStatus?.logs && scraperStatus.logs.length > 0) {
+      const newLogs: LogEntry[] = scraperStatus.logs.map((log, idx) => ({
+        id: `server-${idx}`,
+        timestamp: new Date().toLocaleTimeString('en-GB'),
+        level: log.level as LogEntry['level'],
+        message: log.message,
+      }));
+      setLogs(prev => {
+        // Only add new logs
+        const existingMessages = new Set(prev.map(l => l.message));
+        const unique = newLogs.filter(l => !existingMessages.has(l.message));
+        return [...prev, ...unique];
+      });
+    }
+  }, [scraperStatus?.logs]);
 
   const addLog = (level: LogEntry['level'], message: string) => {
     const now = new Date().toLocaleTimeString('en-GB');
@@ -50,66 +70,45 @@ export default function Scraper() {
 
   const handleRunScraper = async () => {
     if (isRunning) return;
-
-    setIsRunning(true);
+    
     setLogs([]);
-    setStats({ total: 0, downloaded: 0, failed: 0, elapsed: 0 });
-
     addLog('info', `Starting scraper for date: ${targetDate}`);
     addLog('info', 'Category filter: Fournitures (2)');
-    addLog('info', 'Connecting to marchespublics.gov.ma...');
-
-    // Simulate scraper phases
-    await simulatePhase('Launching browser...', 1000);
-    addLog('success', 'Browser ready');
     
-    await simulatePhase('Navigating to search page...', 1500);
-    addLog('success', 'Search page loaded');
-    
-    await simulatePhase('Applying filters...', 800);
-    addLog('info', `Date range: ${formatDate(targetDate)} to ${formatDate(targetDate)}`);
-    
-    await simulatePhase('Collecting tender links...', 2000);
-    const mockTotal = Math.floor(Math.random() * 20) + 5;
-    setStats(prev => ({ ...prev, total: mockTotal }));
-    addLog('success', `Found ${mockTotal} tender links`);
-
-    // Simulate downloads
-    for (let i = 1; i <= mockTotal; i++) {
-      await simulatePhase(`Downloading tender ${i}/${mockTotal}...`, 300);
-      const success = Math.random() > 0.1;
-      if (success) {
-        setStats(prev => ({ ...prev, downloaded: prev.downloaded + 1 }));
-        addLog('success', `Downloaded: tender_${i}_dce.zip`);
-      } else {
-        setStats(prev => ({ ...prev, failed: prev.failed + 1 }));
-        addLog('error', `Failed: tender_${i} (timeout)`);
-      }
+    try {
+      await triggerScraper.mutateAsync(targetDate);
+      addLog('success', 'Scraper job submitted successfully');
+      toast.success('Scraper started');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Failed to start scraper: ${message}`);
+      toast.error(`Failed to start scraper: ${message}`);
     }
-
-    addLog('info', '═'.repeat(40));
-    addLog('success', 'Scraper completed');
-    setIsRunning(false);
   };
 
-  const handleStopScraper = () => {
+  const handleStopScraper = async () => {
     addLog('warning', 'Stopping scraper...');
-    setIsRunning(false);
-  };
-
-  const simulatePhase = (message: string, delay: number) => {
-    return new Promise<void>(resolve => {
-      addLog('info', message);
-      setTimeout(() => {
-        setStats(prev => ({ ...prev, elapsed: prev.elapsed + delay / 1000 }));
-        resolve();
-      }, delay);
-    });
+    
+    try {
+      await stopScraper.mutateAsync();
+      addLog('info', 'Scraper stopped');
+      toast.info('Scraper stopped');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Failed to stop scraper: ${message}`);
+    }
   };
 
   const formatDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split('-');
     return `${day}/${month}/${year}`;
+  };
+
+  const stats = scraperStatus?.stats || {
+    total: scraperStatus?.total_tenders || 0,
+    downloaded: scraperStatus?.downloaded || 0,
+    failed: scraperStatus?.failed || 0,
+    elapsed: scraperStatus?.elapsed_seconds || 0,
   };
 
   return (
@@ -123,18 +122,28 @@ export default function Scraper() {
           </p>
         </div>
 
-        {/* Alert */}
-        <div className="flex items-start gap-3 p-4 rounded-lg bg-warning/10 border border-warning/20">
-          <AlertCircle className="w-5 h-5 text-warning shrink-0 mt-0.5" />
-          <div className="text-sm">
-            <p className="font-medium text-warning">Backend Required</p>
-            <p className="text-muted-foreground mt-1">
-              The scraper runs on your local Python backend (FastAPI). Make sure 
-              <code className="mx-1 px-1.5 py-0.5 bg-muted rounded font-mono text-xs">python main.py</code> 
-              is running on port 8000.
-            </p>
+        {/* Backend Status Alert */}
+        {isBackendOnline === false ? (
+          <div className="flex items-start gap-3 p-4 rounded-lg bg-destructive/10 border border-destructive/20">
+            <AlertCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <p className="font-medium text-destructive">Backend Offline</p>
+              <p className="text-muted-foreground mt-1">
+                Start the backend: <code className="mx-1 px-1.5 py-0.5 bg-muted rounded font-mono text-xs">cd backend && python main.py</code>
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex items-start gap-3 p-4 rounded-lg bg-success/10 border border-success/20">
+            <CheckCircle2 className="w-5 h-5 text-success shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <p className="font-medium text-success">Backend Online</p>
+              <p className="text-muted-foreground mt-1">
+                Connected to <code className="mx-1 px-1.5 py-0.5 bg-muted rounded font-mono text-xs">localhost:8000</code>
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Controls */}
         <div className="grid md:grid-cols-2 gap-6">
@@ -156,20 +165,29 @@ export default function Scraper() {
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                Downloads tenders published on this date
+                Downloads tenders published on this date ({formatDate(targetDate)})
               </p>
             </div>
 
             <div className="pt-2 flex gap-3">
               {!isRunning ? (
-                <Button onClick={handleRunScraper} className="flex-1">
+                <Button 
+                  onClick={handleRunScraper} 
+                  className="flex-1"
+                  disabled={triggerScraper.isPending || isBackendOnline === false}
+                >
                   <Play className="w-4 h-4 mr-2" />
-                  Run Scraper
+                  {triggerScraper.isPending ? 'Starting...' : 'Run Scraper'}
                 </Button>
               ) : (
-                <Button onClick={handleStopScraper} variant="destructive" className="flex-1">
+                <Button 
+                  onClick={handleStopScraper} 
+                  variant="destructive" 
+                  className="flex-1"
+                  disabled={stopScraper.isPending}
+                >
                   <Square className="w-4 h-4 mr-2" />
-                  Stop Scraper
+                  {stopScraper.isPending ? 'Stopping...' : 'Stop Scraper'}
                 </Button>
               )}
             </div>
@@ -195,7 +213,7 @@ export default function Scraper() {
               />
               <StatCard 
                 label="Elapsed" 
-                value={`${stats.elapsed.toFixed(1)}s`}
+                value={`${(stats.elapsed || 0).toFixed(1)}s`}
                 icon={<Clock className="w-4 h-4" />}
               />
             </div>
