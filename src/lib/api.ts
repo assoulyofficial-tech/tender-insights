@@ -9,8 +9,12 @@ import type {
   TenderSearchParams 
 } from '@/types/tender';
 
-// Backend URL - configure this for your local setup
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Backend URL
+//
+// Local development: use a relative base URL so Vite can proxy /api and /health
+// to the FastAPI backend (see vite.config.ts).
+// Production: set VITE_API_URL to your deployed backend base URL.
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : '');
 
 class TenderApiClient {
   private baseUrl: string;
