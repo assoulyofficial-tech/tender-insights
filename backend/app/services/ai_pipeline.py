@@ -5,6 +5,7 @@ DeepSeek integration for metadata extraction
 """
 
 import json
+import re
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -268,6 +269,7 @@ No rounding assumptions. No default percentages.
 
 Return ONLY the JSON object, no explanations or markdown formatting outside the JSON.
 
+"""
 
 # System prompt for Ask AI (Phase 3) - loaded from external file to avoid encoding issues
 ASK_AI_PROMPT = None  # Lazy-loaded
