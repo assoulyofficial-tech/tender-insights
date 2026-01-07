@@ -260,45 +260,83 @@ Return ONLY the JSON object, no explanations or markdown formatting outside the 
 
 
 # System prompt for Ask AI (Phase 3)
-ASK_AI_PROMPT = """You are an expert in Moroccan public procurement law and tender analysis.
+ASK_AI_PROMPT = """You are an expert consultant specialized in Moroccan public procurement law (marchés publics marocains).
+
+## YOUR EXPERTISE
+
+- Décret n° 2-12-349 relatif aux marchés publics
+- Règlementation des appels d'offres (AOON, AOOI)
+- Cahiers des clauses administratives générales (CCAG)
+- Procédures de soumission et garanties
+- Délais d'exécution et pénalités
+- Contentieux des marchés publics
 
 ## CONTEXT
-You have access to the full text of a government tender including:
-- Avis de consultation
+
+You have access to the complete tender dossier including:
+- Avis de consultation / Avis d'appel d'offres
 - Règlement de consultation (RC)
 - Cahier des Prescriptions Spéciales (CPS)
-- Any annexes or modifications
-
-## YOUR ROLE
-
-Answer questions about this tender with:
-1. Expert knowledge of Moroccan procurement regulations
-2. Direct citations from the documents
-3. Clear, actionable guidance
+- Annexes et avenants (modifications)
 
 ## LANGUAGE SUPPORT
 
-You understand and respond in:
-- French (formal)
-- Moroccan Darija (informal Arabic dialect)
+You MUST respond in the SAME language the user writes in:
 
-Respond in the same language the user asks in.
+1. **French (Français)**: Formal procurement terminology
+   - Example: "Quelles sont les garanties exigées?"
+   
+2. **Moroccan Darija (الدارجة المغربية)**: Informal Arabic dialect
+   - Example: "شنو هي الوثائق اللي خاصني نجيب؟"
+   - Example: "كيفاش نقدر نشارك فهاد لابيل؟"
+   
+3. **Modern Standard Arabic (العربية الفصحى)**: Formal Arabic
+   - Example: "ما هي شروط المشاركة في هذه الصفقة؟"
 
-## CITATION FORMAT
+Detect the language automatically and respond accordingly.
 
-When referencing documents, cite like:
-[Document: CPS, Section 5.2]
-[Document: Avis, Paragraph 3]
+## CITATION FORMAT (MANDATORY)
 
-## RULES
+Every factual claim MUST include a citation:
 
-1. Only answer based on the provided tender documents
-2. If information is not in the documents, say so clearly
-3. Do not make legal assumptions
-4. Do not provide general advice - be specific to this tender
-5. If asked about obligations, cite the exact clause
+Format: **[Source: DOCUMENT_TYPE, Section/Article X]**
 
-Be concise but complete."""
+Examples:
+- [Source: CPS, Article 15]
+- [Source: RC, Section 3.2]
+- [Source: Avis, Paragraphe 4]
+- [Source: Annexe n°2, Article 8 modifié]
+
+## RESPONSE STRUCTURE
+
+1. **Direct Answer**: Answer the question first
+2. **Relevant Details**: Provide supporting information with citations
+3. **Important Notes**: Highlight deadlines, penalties, or critical requirements
+4. **Related Considerations**: Mention related clauses the user should review
+
+## STRICT RULES
+
+1. ❌ Do NOT provide general legal advice
+2. ❌ Do NOT make assumptions about unstated requirements
+3. ❌ Do NOT invent obligations not in the documents
+4. ✅ If information is not in documents, state: "Cette information n'est pas mentionnée dans le dossier d'appel d'offres."
+5. ✅ If a clause is ambiguous, quote it exactly and note the ambiguity
+6. ✅ Always cite the specific document and section
+
+## COMMON QUESTION PATTERNS
+
+- Délais de soumission → Check Avis + RC for deadline
+- Garanties (caution provisoire/définitive) → Check CPS + RC
+- Documents à fournir → Check RC Section "Pièces justificatives"
+- Critères d'évaluation → Check RC Section "Jugement des offres"
+- Pénalités de retard → Check CPS Articles related to "pénalités"
+- Conditions de paiement → Check CPS Articles "règlement" or "paiement"
+
+## OUTPUT FORMAT
+
+Respond naturally in the detected language. Use bullet points for lists.
+Include citations inline with the text.
+End with any critical deadlines or warnings if relevant."""
 
 
 class AIService:
@@ -450,36 +488,76 @@ class AIService:
     def ask_ai(
         self,
         question: str,
-        documents: List[ExtractionResult]
+        documents: List[ExtractionResult],
+        tender_reference: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Phase 3: Answer user questions about tender
+        Phase 3: Expert Q&A about tender documents
+        Supports French, Moroccan Darija, and Modern Standard Arabic
         
         Args:
-            question: User's question (French or Darija)
-            documents: All tender documents
+            question: User's question in any supported language
+            documents: All tender documents for context
+            tender_reference: Optional tender reference for logging
         
         Returns:
-            Dict with answer and citations
+            Dict with answer, citations, detected language, and metadata
         """
-        # Build context
+        if not question or len(question.strip()) < 3:
+            logger.warning("Question too short")
+            return {
+                "answer": "Veuillez poser une question plus détaillée.",
+                "citations": [],
+                "language_detected": "fr",
+                "error": "question_too_short"
+            }
+        
+        # Build context with document priority ordering
         context_parts = []
-        for doc in documents:
-            if doc.text:
-                context_parts.append(
-                    f"=== Document: {doc.document_type.value} ({doc.filename}) ===\n{doc.text[:5000]}"
-                )
+        doc_summary = []
+        
+        # Order documents by type for better context
+        priority_order = [
+            DocumentType.AVIS,
+            DocumentType.RC,
+            DocumentType.CPS,
+            DocumentType.ANNEXE
+        ]
+        
+        for doc_type in priority_order:
+            for doc in documents:
+                if doc.document_type == doc_type and doc.text:
+                    # Use more context for important documents
+                    char_limit = 8000 if doc_type in [DocumentType.CPS, DocumentType.RC] else 5000
+                    context_parts.append(
+                        f"=== {doc_type.value}: {doc.filename} ===\n{doc.text[:char_limit]}"
+                    )
+                    doc_summary.append(f"{doc_type.value} ({doc.filename})")
+        
+        if not context_parts:
+            return {
+                "answer": "Aucun document disponible pour répondre à cette question.",
+                "citations": [],
+                "language_detected": None,
+                "error": "no_documents"
+            }
         
         full_context = "\n\n".join(context_parts)
         
-        user_message = f"""TENDER DOCUMENTS:
+        # Build user message with clear structure
+        user_message = f"""DOSSIER D'APPEL D'OFFRES
+Documents disponibles: {', '.join(doc_summary)}
 
-{full_context[:25000]}
+--- CONTENU DES DOCUMENTS ---
 
----
+{full_context[:30000]}
 
-USER QUESTION:
+--- FIN DES DOCUMENTS ---
+
+QUESTION DE L'UTILISATEUR:
 {question}"""
+        
+        logger.info(f"Ask AI: Processing question for tender {tender_reference or 'unknown'}")
         
         response = self._call_ai(
             ASK_AI_PROMPT,
@@ -488,22 +566,61 @@ USER QUESTION:
         )
         
         if not response:
-            return None
+            return {
+                "answer": "Une erreur s'est produite lors du traitement de votre question. Veuillez réessayer.",
+                "citations": [],
+                "language_detected": None,
+                "error": "ai_call_failed"
+            }
         
-        # Parse citations from response
+        # Parse citations with new format [Source: DOC, Section X]
         citations = []
-        import re
-        citation_pattern = r'\[Document:\s*([^,\]]+)(?:,\s*([^\]]+))?\]'
-        matches = re.findall(citation_pattern, response)
-        for match in matches:
-            citations.append({
-                "document": match[0].strip(),
-                "section": match[1].strip() if match[1] else None
-            })
+        citation_patterns = [
+            r'\[Source:\s*([^,\]]+)(?:,\s*([^\]]+))?\]',  # New format
+            r'\[Document:\s*([^,\]]+)(?:,\s*([^\]]+))?\]',  # Legacy format
+            r'\*\*\[Source:\s*([^,\]]+)(?:,\s*([^\]]+))?\]\*\*',  # Bold format
+        ]
+        
+        seen_citations = set()
+        for pattern in citation_patterns:
+            matches = re.findall(pattern, response)
+            for match in matches:
+                doc_name = match[0].strip()
+                section = match[1].strip() if len(match) > 1 and match[1] else None
+                
+                # Normalize document type
+                doc_type_normalized = doc_name.upper()
+                for dt in DocumentType:
+                    if dt.value in doc_type_normalized or doc_type_normalized in dt.value:
+                        doc_type_normalized = dt.value
+                        break
+                
+                citation_key = f"{doc_type_normalized}:{section}"
+                if citation_key not in seen_citations:
+                    seen_citations.add(citation_key)
+                    citations.append({
+                        "document": doc_type_normalized,
+                        "section": section,
+                        "raw": match[0]
+                    })
+        
+        # Detect language from response (simple heuristic)
+        language_detected = "fr"  # Default
+        arabic_chars = len(re.findall(r'[\u0600-\u06FF]', response))
+        if arabic_chars > 50:
+            # Check for Darija markers (common Darija words)
+            darija_markers = ['كيفاش', 'شنو', 'علاش', 'فين', 'واش', 'ديال', 'هاد']
+            if any(marker in response for marker in darija_markers):
+                language_detected = "darija"
+            else:
+                language_detected = "ar"
         
         return {
             "answer": response,
-            "citations": citations
+            "citations": citations,
+            "language_detected": language_detected,
+            "documents_used": doc_summary,
+            "question": question
         }
 
 
