@@ -116,6 +116,21 @@ export interface PaginatedResponse<T> {
   total_pages: number;
 }
 
+// Scraper log entry
+export interface ScraperLogEntry {
+  level: 'info' | 'success' | 'warning' | 'error';
+  message: string;
+  timestamp?: string;
+}
+
+// Scraper stats
+export interface ScraperStats {
+  total: number;
+  downloaded: number;
+  failed: number;
+  elapsed: number;
+}
+
 // Scraper status
 export interface ScraperStatus {
   is_running: boolean;
@@ -125,6 +140,8 @@ export interface ScraperStatus {
   failed: number;
   elapsed_seconds: number;
   last_run: string | null;
+  logs?: ScraperLogEntry[];
+  stats?: ScraperStats;
 }
 
 // Search/filter params
