@@ -3,7 +3,7 @@
 
 # Web Framework
 fastapi>=0.109.2
-uvicorn[standard]>=0.27.1
+uvicorn>=0.27.1  # (no [standard] extras to avoid compilation on Windows)
 python-multipart>=0.0.9
 
 # Database
@@ -25,20 +25,20 @@ openpyxl>=3.1.2
 pandas>=2.2.3
 pymupdf>=1.25.0  # Pre-built wheels for Python 3.13
 
-# OCR (optional - skip on Windows if issues)
+# OCR (optional - often problematic on Windows)
 # paddlepaddle>=2.6.0
 # paddleocr>=2.7.3
 
 # AI
-openai==1.12.0  # DeepSeek uses OpenAI-compatible API
+openai>=1.12.0  # DeepSeek uses OpenAI-compatible API
 
 # Utilities
-python-dotenv==1.0.1
-pydantic==2.6.1
-pydantic-settings==2.1.0
+python-dotenv>=1.0.1
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
 
 # Scheduling
-apscheduler==3.10.4
+apscheduler>=3.10.4
 
 # Logging
-loguru==0.7.2
+loguru>=0.7.2
