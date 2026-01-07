@@ -115,7 +115,7 @@ class ScraperJob(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     
-    target_date = Column(String(10), nullable=False)  # YYYY-MM-DD
+    target_date = Column(String(50), nullable=False)  # Date range: "YYYY-MM-DD to YYYY-MM-DD"
     status = Column(String(50), default="RUNNING")  # RUNNING, COMPLETED, FAILED, STOPPED
     
     # Stats
