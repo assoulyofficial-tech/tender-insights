@@ -178,7 +178,7 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                     external_reference=f"tender_{result.index}",
                     source_url=result.url,
                     status=TenderStatus.PENDING,
-                    download_date=target_date or datetime.now().strftime("%Y-%m-%d")
+                    download_date=start_date or datetime.now().strftime("%Y-%m-%d")
                 )
                 db.add(tender)
                 db.commit()
