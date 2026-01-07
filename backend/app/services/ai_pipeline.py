@@ -134,69 +134,129 @@ UNIVERSAL_EXTRACTION_PROMPT = """You are a legal-technical extraction engine for
 
 ## OPERATING MODE: STRICT EXTRACTION
 
-You MUST NOT hallucinate, infer, guess, merge, or simplify.
+You MUST NOT:
+- Hallucinate any data
+- Infer missing values
+- Guess percentages or amounts
+- Merge unrelated lots
+- Simplify technical specifications
+- Translate text
+
 If something is missing → null.
 If something is unclear → null.
 
-## INPUT DOCUMENTS PRIORITY
+## INPUT DOCUMENTS PRIORITY (AUTHORITATIVE ORDER)
 
-1. Latest Annexe (overrides all)
+1. Latest Annexe (highest authority - overrides all previous values)
 2. CPS (Cahier des Prescriptions Spéciales)
 3. RC (Règlement de Consultation)  
 4. Avis (lowest authority)
+
+For each field, prefer the most recent explicit statement from the highest-priority document.
+
+## ANNEX HANDLING RULES
+
+Annexes modify previous documents. When processing:
+1. Identify annex date/version if stated
+2. Later annexes override earlier ones
+3. If an annex explicitly modifies a field, use the annex value
+4. Unchanged fields retain their original source
+
+## LOT HANDLING RULES (CRITICAL)
+
+- Do NOT merge lots
+- Each lot must be extracted independently  
+- Items belong ONLY to their declared lot
+- If lot boundaries are unclear, do NOT guess assignment
+- Empty lots array is valid if no lots are explicitly defined
+
+## ITEM EXTRACTION RULES
+
+For each item within a lot:
+- Extract EXACT item name as written
+- Extract quantity WITH unit (e.g., "50 unités", "100 mètres")
+- Extract FULL technical description VERBATIM - do NOT summarize
+- If technical specs span multiple paragraphs, include ALL text
 
 ## OUTPUT SCHEMA (JSON)
 
 ```json
 {
-  "reference_tender": "<string or null>",
+  "reference_tender": "<exact string or null>",
   "tender_type": "<AOON or AOOI or null>",
-  "issuing_institution": "<string or null>",
-  "institution_address": "<string or null>",
+  "issuing_institution": "<full legal name or null>",
+  "institution_address": "<complete address or null>",
   "submission_deadline": {
     "date": "<DD/MM/YYYY or null>",
-    "time": "<HH:MM or null>"
+    "time": "<HH:MM or null>",
+    "source_document": "<AVIS|RC|CPS|ANNEXE>",
+    "source_override": "<true if overridden by annex>"
   },
-  "folder_opening_location": "<string or null>",
-  "subject": "<string or null>",
-  "total_estimated_value": "<string or null>",
+  "folder_opening_location": "<physical or virtual location or null>",
+  "subject": "<complete subject text or null>",
+  "total_estimated_value": {
+    "value": "<amount or null>",
+    "currency": "<MAD or other or null>"
+  },
   "lots": [
     {
-      "lot_number": "<string>",
-      "lot_subject": "<string>",
-      "lot_estimated_value": "<string or null>",
-      "caution_provisoire": "<string or null>",
-      "caution_definitive_percentage": "<string or null>",
-      "estimated_caution_definitive_value": "<computed or null>",
-      "execution_date": "<string or null>",
+      "lot_number": "<string or null>",
+      "lot_subject": "<complete lot subject or null>",
+      "lot_estimated_value": {
+        "value": "<amount or null>",
+        "currency": "<MAD or null>"
+      },
+      "caution_provisoire": {
+        "value": "<amount or null>",
+        "currency": "<MAD or null>"
+      },
+      "caution_definitive_percentage": "<percentage as string or null>",
+      "estimated_caution_definitive_value": "<computed value or null>",
+      "execution_delay": {
+        "value": "<number or null>",
+        "unit": "<jours|mois or null>"
+      },
       "items": [
         {
-          "item_name": "<exact name>",
-          "quantity": "<number with unit>",
-          "technical_description_full": "<VERBATIM technical specs>"
+          "item_number": "<number or designation or null>",
+          "item_name": "<exact name as written>",
+          "quantity": {
+            "value": "<number or null>",
+            "unit": "<unit string or null>"
+          },
+          "technical_description_full": "<VERBATIM complete technical specifications>"
         }
       ]
     }
-  ]
+  ],
+  "additional_conditions": {
+    "qualification_criteria": "<text or null>",
+    "required_documents": ["<list of required documents>"],
+    "warranty_period": "<duration or null>",
+    "payment_terms": "<terms or null>"
+  }
 }
 ```
 
-## COMPUTATION RULES
+## COMPUTATION RULES (STRICT)
 
-Only compute estimated_caution_definitive_value if:
-- lot_estimated_value exists AND
-- caution_definitive_percentage exists
+Compute `estimated_caution_definitive_value` ONLY IF:
+- `lot_estimated_value` exists AND is numeric
+- `caution_definitive_percentage` exists AND is numeric
 
-Otherwise → null. Never assume percentages.
+Formula: lot_estimated_value × (percentage / 100)
+
+If EITHER value is missing → null
+No rounding assumptions. No default percentages.
 
 ## LANGUAGE RULES
 
-- Preserve original language
-- Do NOT translate
-- Do NOT summarize
-- Technical descriptions must be VERBATIM
+- Preserve original language (French/Arabic)
+- Do NOT translate any text
+- Do NOT summarize technical descriptions
+- Technical descriptions must be VERBATIM copy
 
-Return ONLY the JSON object."""
+Return ONLY the JSON object, no explanations or markdown formatting outside the JSON.
 
 
 # System prompt for Ask AI (Phase 3)
