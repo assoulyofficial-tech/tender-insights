@@ -42,6 +42,18 @@ app.add_middleware(
 app.include_router(router)
 
 
+@app.get("/")
+async def root():
+    """Root endpoint - redirects to API docs"""
+    return {
+        "name": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+
 @app.on_event("startup")
 async def startup():
     """Initialize on startup"""
