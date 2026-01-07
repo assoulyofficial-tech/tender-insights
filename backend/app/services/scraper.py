@@ -91,22 +91,36 @@ class TenderScraper:
         self._stop_requested = True
         self.progress.log("warning", "Stop requested...")
         
-    async def collect_tender_links(self, page, target_date: str) -> List[str]:
+    async def collect_tender_links(
+        self, 
+        page, 
+        start_date: str, 
+        end_date: Optional[str] = None
+    ) -> List[str]:
         """
         Navigate to search page and collect tender URLs
         
         Args:
             page: Playwright page instance
-            target_date: Date in YYYY-MM-DD format
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format (defaults to start_date)
         
         Returns:
             List of tender URLs
         """
-        # Convert date format
-        date_parts = target_date.split('-')
-        formatted_date = f"{date_parts[2]}/{date_parts[1]}/{date_parts[0]}"
+        # Use same date if end_date not provided
+        if not end_date:
+            end_date = start_date
+            
+        # Convert date format (YYYY-MM-DD to DD/MM/YYYY)
+        def format_date(date_str: str) -> str:
+            parts = date_str.split('-')
+            return f"{parts[2]}/{parts[1]}/{parts[0]}"
         
-        self.progress.log("info", f"Date filter: {formatted_date}")
+        formatted_start = format_date(start_date)
+        formatted_end = format_date(end_date)
+        
+        self.progress.log("info", f"Date de mise en ligne: {formatted_start} → {formatted_end}")
         self.progress.log("info", "Category: Fournitures (2)")
         
         # Navigate to homepage
@@ -121,10 +135,10 @@ class TenderScraper:
             value=settings.CATEGORY_FILTER
         )
         
-        # Set date range (same date for start and end)
+        # Set date range (start and end dates)
         section_locator = page.locator('text="Date de mise en ligne :"').locator('..')
-        await section_locator.locator('input').nth(0).fill(formatted_date)
-        await section_locator.locator('input').nth(1).fill(formatted_date)
+        await section_locator.locator('input').nth(0).fill(formatted_start)
+        await section_locator.locator('input').nth(1).fill(formatted_end)
         
         # Clear deadline date fields
         section_limite = page.locator('text="Date limite de remise des plis :"').locator('..')
@@ -286,12 +300,17 @@ class TenderScraper:
                 if tender_page:
                     await tender_page.close()
     
-    async def run(self, target_date: Optional[str] = None) -> List[DownloadedTender]:
+    async def run(
+        self, 
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> List[DownloadedTender]:
         """
         Execute full scraping run
         
         Args:
-            target_date: Date to scrape (YYYY-MM-DD). Defaults to yesterday.
+            start_date: Start date to scrape (YYYY-MM-DD). Defaults to yesterday.
+            end_date: End date to scrape (YYYY-MM-DD). Defaults to start_date.
         
         Returns:
             List of DownloadedTender objects with ZIP bytes in memory
@@ -300,12 +319,17 @@ class TenderScraper:
         self.progress = ScraperProgress(is_running=True)
         
         # Default to yesterday
-        if not target_date:
+        if not start_date:
             yesterday = datetime.today() - timedelta(days=1)
-            target_date = yesterday.strftime('%Y-%m-%d')
+            start_date = yesterday.strftime('%Y-%m-%d')
+        
+        # Default end_date to start_date (single day)
+        if not end_date:
+            end_date = start_date
         
         self.progress.log("info", "=" * 50)
-        self.progress.log("info", f"Starting scraper for: {target_date}")
+        self.progress.log("info", f"Starting scraper")
+        self.progress.log("info", f"Date range: {start_date} → {end_date}")
         self.progress.log("info", "=" * 50)
         
         start_time = datetime.now()
@@ -326,7 +350,7 @@ class TenderScraper:
                 self._update_progress()
                 
                 page = await context.new_page()
-                tender_links = await self.collect_tender_links(page, target_date)
+                tender_links = await self.collect_tender_links(page, start_date, end_date)
                 await page.close()
                 
                 self.progress.total = len(tender_links)
