@@ -17,7 +17,7 @@ from uuid import UUID
 from app.core.database import get_db
 from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType
 from app.services.scraper import TenderScraper, ScraperProgress
-from app.services.extractor import extract_all_from_zip
+from app.services.extractor import process_tender_zip, ExtractionResult, ExtractionMethod, FirstPageResult
 from app.services.ai_pipeline import ai_service
 
 router = APIRouter()
@@ -180,7 +180,7 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
             db.commit()
             return
         
-        # Process downloads
+        # Process downloads using NEW workflow
         extracted_count = 0
         for result in results:
             if result.success and result.zip_bytes:
@@ -195,30 +195,29 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                 db.commit()
                 db.refresh(tender)
                 
-                # Extract files from ZIP
+                # NEW WORKFLOW:
+                # 1. Classify all documents (first-page scan)
+                # 2. Find Avis document
+                # 3. Extract FULL content of Avis ONLY
                 files = result.get_files()
-                extractions = extract_all_from_zip(files)
+                avis_extraction, classifications = process_tender_zip(files)
                 
-                avis_text = None
-                for ext in extractions:
+                # Store only the Avis document (not all files)
+                if avis_extraction and avis_extraction.success:
                     doc = TenderDocument(
                         tender_id=tender.id,
-                        document_type=DocumentType(ext.document_type.value),
-                        filename=ext.filename,
-                        raw_text=ext.text,
-                        page_count=ext.page_count,
-                        extraction_method=ext.extraction_method.value,
-                        file_size_bytes=ext.file_size_bytes,
-                        mime_type=ext.mime_type
+                        document_type=DocumentType(avis_extraction.document_type.value),
+                        filename=avis_extraction.filename,
+                        raw_text=avis_extraction.text,
+                        page_count=avis_extraction.page_count,
+                        extraction_method=avis_extraction.extraction_method.value,
+                        file_size_bytes=avis_extraction.file_size_bytes,
+                        mime_type=avis_extraction.mime_type
                     )
                     db.add(doc)
                     
-                    if ext.document_type.value == "AVIS":
-                        avis_text = ext.text
-                
-                # Run AI extraction on Avis
-                if avis_text:
-                    metadata = ai_service.extract_avis_metadata(avis_text)
+                    # Run AI extraction on Avis
+                    metadata = ai_service.extract_avis_metadata(avis_extraction.text)
                     if metadata:
                         tender.avis_metadata = metadata
                         tender.status = TenderStatus.LISTED
@@ -230,7 +229,7 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                         tender.error_message = "AI extraction failed"
                 else:
                     tender.status = TenderStatus.ERROR
-                    tender.error_message = "No Avis document found"
+                    tender.error_message = "No Avis document found in ZIP"
                 
                 db.commit()
                 extracted_count += 1
