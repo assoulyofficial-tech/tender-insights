@@ -115,10 +115,16 @@ FILENAME_PATTERNS = {
 }
 
 
-def classify_document(text: str, filename: str = "") -> DocumentType:
+def classify_document(text: str, filename: str = "", use_ai: bool = False, is_scanned: bool = False) -> DocumentType:
     """
     Classify document type by scanning first-page content and filename.
     Priority: AVIS > RC > CPS > ANNEXE
+    
+    Args:
+        text: First page text content
+        filename: Document filename
+        use_ai: Whether to use AI classification as fallback
+        is_scanned: Whether document is scanned (limits text for AI)
     """
     text_lower = text.lower()
     filename_lower = filename.lower()
@@ -145,7 +151,103 @@ def classify_document(text: str, filename: str = "") -> DocumentType:
                 if keyword in text_lower:
                     return doc_type
     
+    # PRIORITY 3: Use AI classification if enabled and text available
+    if use_ai and text and len(text.strip()) > 20:
+        ai_result = classify_document_with_ai(text, filename, is_scanned)
+        if ai_result != DocumentType.UNKNOWN:
+            return ai_result
+    
     return DocumentType.UNKNOWN
+
+
+def classify_document_with_ai(text: str, filename: str = "", is_scanned: bool = False) -> DocumentType:
+    """
+    Use DeepSeek AI to classify document type.
+    For scanned documents, limits to first 500 words.
+    
+    Args:
+        text: Document text content
+        filename: Document filename
+        is_scanned: Whether document is scanned (OCR'd)
+    
+    Returns:
+        DocumentType classification
+    """
+    try:
+        from openai import OpenAI
+        from app.core.config import settings
+        
+        if not settings.DEEPSEEK_API_KEY:
+            logger.warning("DeepSeek API key not configured, skipping AI classification")
+            return DocumentType.UNKNOWN
+        
+        # For scanned docs, use first 500 words only
+        if is_scanned:
+            words = text.split()[:500]
+            text_to_analyze = " ".join(words)
+        else:
+            # For digital docs, use first 2000 chars
+            text_to_analyze = text[:2000]
+        
+        client = OpenAI(
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_BASE_URL
+        )
+        
+        system_prompt = """You are a document classifier for Moroccan government tender documents.
+
+Classify the document into ONE of these categories:
+- AVIS: Avis de consultation, avis d'appel d'offres, notice of tender, announcement
+- RC: Règlement de consultation, consultation rules
+- CPS: Cahier des prescriptions spéciales, specifications document
+- ANNEXE: Annexe, addendum, modification document
+- UNKNOWN: Cannot determine
+
+RULES:
+1. If document mentions "avis de consultation" or "avis d'appel d'offres" → AVIS
+2. If document is primarily about rules/procedures for bidders → RC
+3. If document contains technical specifications or requirements → CPS
+4. If document modifies another document → ANNEXE
+5. Only return UNKNOWN if truly cannot classify
+
+Respond with ONLY one word: AVIS, RC, CPS, ANNEXE, or UNKNOWN"""
+
+        user_content = f"""Filename: {filename}
+
+Document first page content:
+{text_to_analyze}
+
+Classification:"""
+
+        logger.info(f"AI classifying document: {filename}")
+        
+        response = client.chat.completions.create(
+            model=settings.DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            max_tokens=10,
+            temperature=0
+        )
+        
+        result = response.choices[0].message.content.strip().upper()
+        
+        # Map response to DocumentType
+        type_map = {
+            "AVIS": DocumentType.AVIS,
+            "RC": DocumentType.RC,
+            "CPS": DocumentType.CPS,
+            "ANNEXE": DocumentType.ANNEXE,
+        }
+        
+        doc_type = type_map.get(result, DocumentType.UNKNOWN)
+        logger.info(f"AI classified {filename} as: {doc_type.value}")
+        return doc_type
+        
+    except Exception as e:
+        logger.error(f"AI classification failed: {e}")
+        return DocumentType.UNKNOWN
 
 
 # ============================
@@ -379,10 +481,15 @@ def _get_first_page_xlsx(file_bytes: io.BytesIO) -> str:
         return ""
 
 
-def extract_first_page(filename: str, file_bytes: io.BytesIO) -> FirstPageResult:
+def extract_first_page(filename: str, file_bytes: io.BytesIO, use_ai_classification: bool = True) -> FirstPageResult:
     """
     Extract FIRST PAGE ONLY for classification purposes.
     This is a quick scan to identify document type.
+    
+    Args:
+        filename: Document filename
+        file_bytes: Document content as BytesIO
+        use_ai_classification: Whether to use AI for classification fallback
     """
     # Skip temp files and hidden files
     base_name = filename.split('/')[-1]
@@ -445,7 +552,13 @@ def extract_first_page(filename: str, file_bytes: io.BytesIO) -> FirstPageResult
             )
         
         # Classify based on first-page content
-        doc_type = classify_document(first_page_text, filename)
+        # Use AI classification for better accuracy, especially on scanned docs
+        doc_type = classify_document(
+            first_page_text, 
+            filename, 
+            use_ai=use_ai_classification,
+            is_scanned=is_scanned
+        )
         
         return FirstPageResult(
             filename=filename,
