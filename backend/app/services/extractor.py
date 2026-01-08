@@ -159,12 +159,8 @@ def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
         from paddleocr import PaddleOCR
         import fitz  # PyMuPDF
         
-        # Initialize PaddleOCR without show_log (compatibility fix)
-        try:
-            ocr = PaddleOCR(use_angle_cls=True, lang='fr', use_gpu=False, show_log=False)
-        except TypeError:
-            # Fallback if show_log not supported
-            ocr = PaddleOCR(use_angle_cls=True, lang='fr', use_gpu=False)
+        # Initialize PaddleOCR - only use_angle_cls and lang are universally supported
+        ocr = PaddleOCR(use_angle_cls=True, lang='fr')
         
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
@@ -368,10 +364,8 @@ def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
         
         logger.info("Full OCR extraction starting...")
         
-        try:
-            ocr = PaddleOCR(use_angle_cls=True, lang='fr', use_gpu=False, show_log=False)
-        except TypeError:
-            ocr = PaddleOCR(use_angle_cls=True, lang='fr', use_gpu=False)
+        # Initialize PaddleOCR - only use_angle_cls and lang are universally supported
+        ocr = PaddleOCR(use_angle_cls=True, lang='fr')
         
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
