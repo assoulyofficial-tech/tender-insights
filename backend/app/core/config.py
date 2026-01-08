@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     
     # DeepSeek AI
     DEEPSEEK_API_KEY: str = ""
-    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_MODEL: str = "deepseek-chat"
     
     # Scraper Configuration
