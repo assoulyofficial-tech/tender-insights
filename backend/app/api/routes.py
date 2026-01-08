@@ -169,6 +169,17 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
         _scraper_instance = TenderScraper(on_progress=on_progress)
         results = await _scraper_instance.run(start_date, end_date)
         
+        # Handle case where no tenders were found
+        if not results:
+            job.status = "COMPLETED"
+            job.total_found = 0
+            job.downloaded = 0
+            job.extracted = 0
+            job.completed_at = datetime.utcnow()
+            job.elapsed_seconds = int(_scraper_instance.progress.elapsed_seconds)
+            db.commit()
+            return
+        
         # Process downloads
         extracted_count = 0
         for result in results:
