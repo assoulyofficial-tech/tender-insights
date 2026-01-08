@@ -27,6 +27,14 @@ class DocumentType(str, Enum):
     RC = "RC"
     CPS = "CPS"
     ANNEXE = "ANNEXE"
+    BPDE = "BPDE"  # Bordereau des Prix - Détail Estimatif
+    AE = "AE"  # Acte d'Engagement
+    DSH = "DSH"  # Décomposition du montant global / Sous-détail
+    CCAG = "CCAG"  # Cahier des Clauses Administratives Générales
+    CCTP = "CCTP"  # Cahier des Clauses Techniques Particulières
+    BQ = "BQ"  # Bordereau des Quantités
+    DQE = "DQE"  # Devis Quantitatif Estimatif
+    OTHER = "OTHER"  # Identified but not in main categories
     UNKNOWN = "UNKNOWN"
 
 
@@ -107,18 +115,45 @@ FILENAME_PATTERNS = {
     DocumentType.CPS: [
         r'\bcps\b',            # "cps" as whole word
         r'\bccaf\b',           # "ccaf"
+    ],
+    DocumentType.CCTP: [
         r'\bcctp\b',           # "cctp" (cahier des clauses techniques)
     ],
     DocumentType.ANNEXE: [
         r'\bannexe\b',
-    ]
+    ],
+    DocumentType.BPDE: [
+        r'\bbpde\b',           # "bpde"
+        r'\bbordereau[\s_-]*prix\b',  # "bordereau prix"
+        r'\bbdp\b',            # "bdp"
+    ],
+    DocumentType.AE: [
+        r'\bae\b',             # "ae" as whole word
+        r'\bacte[\s_-]*engagement\b',  # "acte engagement"
+    ],
+    DocumentType.DSH: [
+        r'\bdsh\b',            # "dsh"
+        r'\bsous[\s_-]*detail\b',  # "sous detail"
+        r'\bdecomposition\b',  # "decomposition"
+    ],
+    DocumentType.CCAG: [
+        r'\bccag\b',           # "ccag"
+    ],
+    DocumentType.BQ: [
+        r'\bbq\b',             # "bq"
+        r'\bbordereau[\s_-]*quantit\b',  # "bordereau quantit..."
+    ],
+    DocumentType.DQE: [
+        r'\bdqe\b',            # "dqe"
+        r'\bdevis[\s_-]*quantitatif\b',  # "devis quantitatif"
+    ],
 }
 
 
 def classify_document(text: str, filename: str = "", use_ai: bool = False, is_scanned: bool = False) -> DocumentType:
     """
     Classify document type by scanning first-page content and filename.
-    Priority: AVIS > RC > CPS > ANNEXE
+    Priority: AVIS > RC > CPS > other document types
     
     Args:
         text: First page text content
@@ -132,8 +167,15 @@ def classify_document(text: str, filename: str = "", use_ai: bool = False, is_sc
     # Extract just the file name without path
     base_filename = filename_lower.split('/')[-1].split('\\')[-1]
     
-    # PRIORITY 1: Check filename patterns (most reliable for Avis detection)
-    for doc_type in [DocumentType.AVIS, DocumentType.RC, DocumentType.CPS, DocumentType.ANNEXE]:
+    # All document types to check
+    all_doc_types = [
+        DocumentType.AVIS, DocumentType.RC, DocumentType.CPS, DocumentType.ANNEXE,
+        DocumentType.BPDE, DocumentType.AE, DocumentType.DSH, DocumentType.CCAG,
+        DocumentType.CCTP, DocumentType.BQ, DocumentType.DQE
+    ]
+    
+    # PRIORITY 1: Check filename patterns (most reliable)
+    for doc_type in all_doc_types:
         if doc_type in FILENAME_PATTERNS:
             for pattern in FILENAME_PATTERNS[doc_type]:
                 if re.search(pattern, base_filename, re.IGNORECASE):
@@ -194,27 +236,38 @@ def classify_document_with_ai(text: str, filename: str = "", is_scanned: bool = 
             base_url=settings.DEEPSEEK_BASE_URL
         )
         
-        system_prompt = """You are a document classifier for Moroccan government tender documents.
+        system_prompt = """You are a document classifier for Moroccan government tender documents (marchés publics).
 
 Classify the document into ONE of these categories:
 - AVIS: Avis de consultation, avis d'appel d'offres, notice of tender, announcement
 - RC: Règlement de consultation, consultation rules
-- CPS: Cahier des prescriptions spéciales, specifications document
-- ANNEXE: Annexe, addendum, modification document
-- UNKNOWN: Cannot determine
+- CPS: Cahier des prescriptions spéciales, Cahier des charges, specifications document
+- ANNEXE: Annexe, addendum, modification document, avenant
+- BPDE: Bordereau des Prix - Détail Estimatif, price schedule, pricing breakdown
+- AE: Acte d'Engagement, commitment letter, bid submission form
+- DSH: Décomposition du montant global, sous-détail des prix, cost breakdown
+- CCAG: Cahier des Clauses Administratives Générales
+- CCTP: Cahier des Clauses Techniques Particulières, technical specifications
+- BQ: Bordereau des Quantités, quantity schedule
+- DQE: Devis Quantitatif Estimatif, estimated quantities and prices
+- OTHER: Document identified but doesn't fit above categories
 
 RULES:
-1. If document mentions "avis de consultation" or "avis d'appel d'offres" → AVIS
-2. If document is primarily about rules/procedures for bidders → RC
-3. If document contains technical specifications or requirements → CPS
-4. If document modifies another document → ANNEXE
-5. Only return UNKNOWN if truly cannot classify
+1. If document is an announcement/notice for tender → AVIS
+2. If document describes rules/procedures for bidders → RC
+3. If document contains technical/administrative specifications → CPS or CCTP
+4. If document is a pricing form/template → BPDE or DQE
+5. If document is a commitment/engagement form → AE
+6. If document breaks down costs/prices → DSH
+7. If document lists quantities → BQ
+8. If you can identify the document type but it doesn't fit categories → OTHER
+9. NEVER return UNKNOWN if you can identify any document type
 
-Respond with ONLY one word: AVIS, RC, CPS, ANNEXE, or UNKNOWN"""
+Respond with ONLY one word from the list above."""
 
         user_content = f"""Filename: {filename}
 
-Document first page content:
+Document content:
 {text_to_analyze}
 
 Classification:"""
@@ -239,9 +292,17 @@ Classification:"""
             "RC": DocumentType.RC,
             "CPS": DocumentType.CPS,
             "ANNEXE": DocumentType.ANNEXE,
+            "BPDE": DocumentType.BPDE,
+            "AE": DocumentType.AE,
+            "DSH": DocumentType.DSH,
+            "CCAG": DocumentType.CCAG,
+            "CCTP": DocumentType.CCTP,
+            "BQ": DocumentType.BQ,
+            "DQE": DocumentType.DQE,
+            "OTHER": DocumentType.OTHER,
         }
         
-        doc_type = type_map.get(result, DocumentType.UNKNOWN)
+        doc_type = type_map.get(result, DocumentType.OTHER)
         logger.info(f"AI classified {filename} as: {doc_type.value}")
         return doc_type
         
@@ -707,8 +768,17 @@ def extract_full_document(filename: str, file_bytes: io.BytesIO, is_scanned: boo
     file_size = file_bytes.tell()
     file_bytes.seek(0)
     
-    mime_type = detect_mime_type(filename)
+    # Determine MIME type from extension
     ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    mime_map = {
+        'pdf': 'application/pdf',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'doc': 'application/msword',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls': 'application/vnd.ms-excel',
+        'txt': 'text/plain',
+    }
+    mime_type = mime_map.get(ext, 'application/octet-stream')
     
     try:
         if ext == 'pdf' or mime_type == 'application/pdf':
