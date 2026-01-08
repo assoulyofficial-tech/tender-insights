@@ -168,7 +168,8 @@ class TenderScraper:
                 timeout=20000
             )
         except PlaywrightTimeout:
-            self.progress.log("warning", "No tenders found for this date")
+            self.progress.log("info", "No tenders posted for this date range")
+            self.progress.log("success", "Search completed - 0 tenders found")
             return []
         
         # Extract all tender links
