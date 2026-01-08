@@ -152,11 +152,14 @@ class TenderScraper:
         await page.locator('input[title="Lancer la recherche"]').nth(0).click()
         await page.wait_for_load_state("networkidle")
         
-        # Set page size to 500
-        await page.select_option(
-            '#ctl0_CONTENU_PAGE_resultSearch_listePageSizeTop', 
-            value="500"
-        )
+        # Try to set page size to 500 (optional - may not exist on all pages)
+        try:
+            page_size_selector = '#ctl0_CONTENU_PAGE_resultSearch_listePageSizeTop'
+            await page.wait_for_selector(page_size_selector, timeout=5000)
+            await page.select_option(page_size_selector, value="500")
+            self.progress.log("info", "Set page size to 500")
+        except PlaywrightTimeout:
+            self.progress.log("warning", "Page size selector not found, continuing with default")
         
         # Wait for results
         try:
