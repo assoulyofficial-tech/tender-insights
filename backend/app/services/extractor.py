@@ -63,67 +63,87 @@ class ExtractionResult:
 
 
 # Classification keywords for document type detection
+# Priority order matters - AVIS is checked FIRST
 CLASSIFICATION_KEYWORDS = {
     DocumentType.AVIS: [
         "avis de consultation",
-        "avis d'appel d'offres",
-        "aoon",
-        "aooi",
-        "avis d'appel"
+        "avis d'appel d'offres", 
+        "avis d'appel",
+        "avis appel offres",
+        "avis ao",
+        "avis",  # Generic - filename must contain "avis"
     ],
     DocumentType.RC: [
         "règlement de consultation",
         "reglement de consultation",
-        "référence de consultation",
-        "reference de consultation"
+        "règlement de la consultation",
+        "reglement de la consultation",
     ],
     DocumentType.CPS: [
         "cahier des prescriptions spéciales",
         "cahier des prescriptions speciales",
-        "cps"
+        "cahier des clauses",
     ],
     DocumentType.ANNEXE: [
         "annexe",
         "additif",
         "avenant",
-        "modification"
+    ]
+}
+
+# Filename patterns for classification (regex patterns)
+FILENAME_PATTERNS = {
+    DocumentType.AVIS: [
+        r'\bavis\b',           # "avis" as whole word
+        r'\bavis[\s_-]',       # "avis " or "avis_" or "avis-"
+        r'[\s_-]avis\b',       # " avis" or "_avis" or "-avis"
+        r'avis[\s_-]*(ar|fr)', # "avis ar" or "avis fr" (Arabic/French)
+    ],
+    DocumentType.RC: [
+        r'\brc\b',             # "rc" as whole word
+        r'\brcdp\b',           # "rcdp"
+        r'\brcdg\b',           # "rcdg"
+    ],
+    DocumentType.CPS: [
+        r'\bcps\b',            # "cps" as whole word
+        r'\bccaf\b',           # "ccaf"
+        r'\bcctp\b',           # "cctp" (cahier des clauses techniques)
+    ],
+    DocumentType.ANNEXE: [
+        r'\bannexe\b',
     ]
 }
 
 
-def detect_mime_type(filename: str) -> str:
-    """Detect MIME type from filename extension"""
-    ext = filename.lower().split('.')[-1] if '.' in filename else ''
-    
-    mime_map = {
-        'pdf': 'application/pdf',
-        'doc': 'application/msword',
-        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'xls': 'application/vnd.ms-excel',
-        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'odt': 'application/vnd.oasis.opendocument.text',
-        'rtf': 'application/rtf',
-        'txt': 'text/plain',
-    }
-    
-    return mime_map.get(ext, 'application/octet-stream')
-
-
 def classify_document(text: str, filename: str = "") -> DocumentType:
     """
-    Classify document type by scanning first-page content keywords
+    Classify document type by scanning first-page content and filename.
+    Priority: AVIS > RC > CPS > ANNEXE
     """
     text_lower = text.lower()
     filename_lower = filename.lower()
     
-    # Check each document type
-    for doc_type, keywords in CLASSIFICATION_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in text_lower:
-                return doc_type
-            # Filename is secondary hint
-            if keyword.replace(' ', '') in filename_lower.replace(' ', '').replace('_', ''):
-                return doc_type
+    # Extract just the file name without path
+    base_filename = filename_lower.split('/')[-1].split('\\')[-1]
+    
+    # PRIORITY 1: Check filename patterns (most reliable for Avis detection)
+    for doc_type in [DocumentType.AVIS, DocumentType.RC, DocumentType.CPS, DocumentType.ANNEXE]:
+        if doc_type in FILENAME_PATTERNS:
+            for pattern in FILENAME_PATTERNS[doc_type]:
+                if re.search(pattern, base_filename, re.IGNORECASE):
+                    # For AVIS, make sure it's not RC/CPS file with "avis" in name
+                    if doc_type == DocumentType.AVIS:
+                        # Exclude if filename clearly indicates RC or CPS
+                        if re.search(r'\b(rc|cps|ccaf|rcdp|rcdg)\b', base_filename):
+                            continue
+                    return doc_type
+    
+    # PRIORITY 2: Check text content keywords
+    for doc_type in [DocumentType.AVIS, DocumentType.RC, DocumentType.CPS, DocumentType.ANNEXE]:
+        if doc_type in CLASSIFICATION_KEYWORDS:
+            for keyword in CLASSIFICATION_KEYWORDS[doc_type]:
+                if keyword in text_lower:
+                    return doc_type
     
     return DocumentType.UNKNOWN
 
@@ -209,6 +229,128 @@ def _get_first_page_docx(file_bytes: io.BytesIO) -> str:
         return ""
 
 
+def _get_first_page_doc(file_bytes: io.BytesIO) -> str:
+    """
+    Extract first page text from legacy .doc files.
+    Uses multiple fallback methods.
+    """
+    file_bytes.seek(0)
+    content = file_bytes.read()
+    
+    # Method 1: Try using antiword via subprocess (if installed)
+    try:
+        import subprocess
+        import tempfile
+        
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        try:
+            result = subprocess.run(
+                ['antiword', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                import os
+                os.unlink(tmp_path)
+                # Return first 1000 chars
+                return result.stdout[:1000]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        finally:
+            try:
+                import os
+                os.unlink(tmp_path)
+            except:
+                pass
+    except Exception:
+        pass
+    
+    # Method 2: Basic binary text extraction (fallback)
+    try:
+        # .doc files often have readable text mixed with binary
+        text_parts = []
+        # Try to decode as various encodings
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                decoded = content.decode(encoding, errors='ignore')
+                # Extract readable text sequences (4+ chars)
+                import re
+                words = re.findall(r'[a-zA-ZÀ-ÿ\s]{4,}', decoded)
+                if words:
+                    text = ' '.join(words)
+                    # Clean up
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if len(text) > 50:  # Reasonable amount of text
+                        return text[:1000]
+            except:
+                continue
+    except Exception as e:
+        logger.warning(f"Binary .doc extraction failed: {e}")
+    
+    return ""
+
+
+def _extract_full_doc(file_bytes: io.BytesIO) -> Tuple[str, int]:
+    """Full extraction from legacy .doc files"""
+    file_bytes.seek(0)
+    content = file_bytes.read()
+    
+    # Method 1: Try using antiword via subprocess
+    try:
+        import subprocess
+        import tempfile
+        
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        try:
+            result = subprocess.run(
+                ['antiword', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                import os
+                os.unlink(tmp_path)
+                return result.stdout, None
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        finally:
+            try:
+                import os
+                os.unlink(tmp_path)
+            except:
+                pass
+    except Exception:
+        pass
+    
+    # Method 2: Basic binary text extraction
+    try:
+        text_parts = []
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                decoded = content.decode(encoding, errors='ignore')
+                import re
+                words = re.findall(r'[a-zA-ZÀ-ÿ0-9\s\.,;:\-\(\)]{4,}', decoded)
+                if words:
+                    text = ' '.join(words)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if len(text) > 100:
+                        return text, None
+            except:
+                continue
+    except Exception as e:
+        logger.warning(f"Binary .doc full extraction failed: {e}")
+    
+    return "[.DOC EXTRACTION FAILED - Install antiword for better support]", None
+
+
 def _get_first_page_xlsx(file_bytes: io.BytesIO) -> str:
     """Get first rows from first sheet of XLSX"""
     file_bytes.seek(0)
@@ -279,18 +421,9 @@ def extract_first_page(filename: str, file_bytes: io.BytesIO) -> FirstPageResult
             first_page_text = _get_first_page_docx(file_bytes)
             
         elif ext == 'doc':
-            # Legacy .doc files - mark as unsupported for now
-            logger.warning(f"Legacy .doc file not supported: {filename}")
-            return FirstPageResult(
-                filename=filename,
-                first_page_text="",
-                document_type=DocumentType.UNKNOWN,
-                is_scanned=False,
-                mime_type=mime_type,
-                file_size_bytes=file_size,
-                success=False,
-                error="Legacy .doc format not supported"
-            )
+            # Legacy .doc files - try extraction
+            logger.info(f"Extracting legacy .doc file: {filename}")
+            first_page_text = _get_first_page_doc(file_bytes)
             
         elif ext in ('xls', 'xlsx') or 'excel' in mime_type or 'spreadsheet' in mime_type:
             first_page_text = _get_first_page_xlsx(file_bytes)
@@ -466,6 +599,10 @@ def extract_full_document(filename: str, file_bytes: io.BytesIO, is_scanned: boo
                 
         elif ext == 'docx' or 'wordprocessingml' in mime_type:
             text, page_count = _extract_full_docx(file_bytes)
+            method = ExtractionMethod.DIGITAL
+            
+        elif ext == 'doc':
+            text, page_count = _extract_full_doc(file_bytes)
             method = ExtractionMethod.DIGITAL
             
         elif ext in ('xls', 'xlsx') or 'excel' in mime_type or 'spreadsheet' in mime_type:
