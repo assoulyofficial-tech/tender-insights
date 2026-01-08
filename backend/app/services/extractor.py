@@ -341,7 +341,7 @@ def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
     try:
         import fitz  # PyMuPDF
         import tempfile
-        import os
+        import atexit
         
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
@@ -354,34 +354,37 @@ def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
         page = doc[0]
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         
-        # Save to temp file for PaddleX
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            pix.save(tmp.name)
-            tmp_path = tmp.name
+        # Save to temp file for PaddleX - don't delete immediately (Windows lock issue)
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        tmp_path = tmp.name
+        pix.save(tmp_path)
+        tmp.close()
+        
+        # Register cleanup for later (when file is no longer locked)
+        def cleanup():
+            try:
+                import os
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except:
+                pass
+        atexit.register(cleanup)
         
         doc.close()
         
-        try:
-            # Use PaddleX OCR pipeline
-            from paddlex import create_pipeline
-            
-            pipeline = create_pipeline(pipeline="OCR")
-            output = pipeline.predict(tmp_path)
-            
-            # Extract text from results
-            text_lines = []
-            for result in output:
-                if hasattr(result, 'rec_texts') and result.rec_texts:
-                    text_lines.extend(result.rec_texts)
-            
-            return "\n".join(text_lines)
-            
-        finally:
-            # Cleanup temp file
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+        # Use PaddleX OCR pipeline
+        from paddlex import create_pipeline
+        
+        pipeline = create_pipeline(pipeline="OCR")
+        output = pipeline.predict(tmp_path)
+        
+        # Extract text from results
+        text_lines = []
+        for result in output:
+            if hasattr(result, 'rec_texts') and result.rec_texts:
+                text_lines.extend(result.rec_texts)
+        
+        return "\n".join(text_lines)
         
     except ImportError as e:
         logger.warning(f"OCR dependencies not available: {e}")
@@ -696,7 +699,7 @@ def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
     try:
         import fitz
         import tempfile
-        import os
+        import atexit
         
         logger.info("Full OCR extraction starting...")
         
@@ -708,35 +711,46 @@ def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
         from paddlex import create_pipeline
         pipeline = create_pipeline(pipeline="OCR")
         
+        # Track temp files for cleanup
+        temp_files = []
+        
         all_text = []
         for page_num in range(page_count):
             page = doc[page_num]
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
             
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                pix.save(tmp.name)
-                tmp_path = tmp.name
+            # Save to temp file - don't delete immediately (Windows lock issue)
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp_path = tmp.name
+            pix.save(tmp_path)
+            tmp.close()
+            temp_files.append(tmp_path)
             
-            try:
-                output = pipeline.predict(tmp_path)
-                
-                # Extract text from results
-                page_lines = []
-                for result in output:
-                    if hasattr(result, 'rec_texts') and result.rec_texts:
-                        page_lines.extend(result.rec_texts)
-                
-                if page_lines:
-                    page_text = "\n".join(page_lines)
-                    all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
+            output = pipeline.predict(tmp_path)
+            
+            # Extract text from results
+            page_lines = []
+            for result in output:
+                if hasattr(result, 'rec_texts') and result.rec_texts:
+                    page_lines.extend(result.rec_texts)
+            
+            if page_lines:
+                page_text = "\n".join(page_lines)
+                all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
         
         doc.close()
+        
+        # Register cleanup for all temp files at exit
+        def cleanup():
+            import os
+            for f in temp_files:
+                try:
+                    if os.path.exists(f):
+                        os.unlink(f)
+                except:
+                    pass
+        atexit.register(cleanup)
+        
         return "\n\n".join(all_text), page_count
         
     except ImportError as e:
