@@ -337,61 +337,87 @@ def _is_pdf_scanned(file_bytes: io.BytesIO) -> Tuple[bool, str]:
 
 
 def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
-    """OCR only the first page of a scanned PDF using PaddleX OCR pipeline"""
+    """OCR only the first page of a scanned PDF using PaddleX OCR pipeline.
+
+    NOTE: On Windows, PaddleX sometimes tries to delete the input image while it is still
+    locked, raising a "cannot remove file ... Permission denied" error. That cleanup error
+    is non-fatal for our use case, so we ignore it and keep the extracted text.
+    """
+
+    def _is_nonfatal_temp_cleanup_error(err: Exception) -> bool:
+        s = str(err).lower()
+        return (
+            ("cannot remove file" in s and "permission denied" in s)
+            or ("winerror 32" in s)  # file in use
+        )
+
+    doc = None
     try:
         import fitz  # PyMuPDF
         import tempfile
         import atexit
-        
+
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
-        
+
         if len(doc) == 0:
-            doc.close()
             return ""
-        
-        # Only first page - save as temp image
+
+        # Only first page - render to an image
         page = doc[0]
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        
-        # Save to temp file for PaddleX - don't delete immediately (Windows lock issue)
-        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+
+        # Create a temp path without keeping the file handle open (Windows)
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         tmp_path = tmp.name
-        pix.save(tmp_path)
         tmp.close()
-        
+
+        pix.save(tmp_path)
+
         # Register cleanup for later (when file is no longer locked)
-        def cleanup():
+        def cleanup() -> None:
             try:
                 import os
+
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
-            except:
+            except Exception:
                 pass
+
         atexit.register(cleanup)
-        
-        doc.close()
-        
-        # Use PaddleX OCR pipeline
+
+        # OCR
         from paddlex import create_pipeline
-        
+
         pipeline = create_pipeline(pipeline="OCR")
-        output = pipeline.predict(tmp_path)
-        
-        # Extract text from results
-        text_lines = []
-        for result in output:
-            if hasattr(result, 'rec_texts') and result.rec_texts:
-                text_lines.extend(result.rec_texts)
-        
+
+        text_lines: List[str] = []
+        try:
+            output = pipeline.predict(tmp_path)
+            for result in output:
+                if hasattr(result, "rec_texts") and result.rec_texts:
+                    text_lines.extend(result.rec_texts)
+        except Exception as e:
+            if _is_nonfatal_temp_cleanup_error(e):
+                logger.warning(f"OCR temp cleanup error ignored for {tmp_path}: {e}")
+            else:
+                raise
+
         return "\n".join(text_lines)
-        
+
     except ImportError as e:
         logger.warning(f"OCR dependencies not available: {e}")
         return "[OCR REQUIRED]"
     except Exception as e:
         logger.error(f"First-page OCR failed: {e}")
         return ""
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
 
 
 def _get_first_page_docx(file_bytes: io.BytesIO) -> str:
@@ -695,70 +721,97 @@ def _extract_full_pdf_digital(file_bytes: io.BytesIO) -> Tuple[str, int]:
 
 
 def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
-    """Full OCR extraction from scanned PDF using PaddleX OCR pipeline"""
+    """Full OCR extraction from scanned PDF using PaddleX OCR pipeline.
+
+    On Windows, PaddleX may raise a non-fatal exception when trying to delete temp images
+    ("cannot remove file ... Permission denied"). We treat that as a warning and keep
+    extracted text.
+    """
+
+    def _is_nonfatal_temp_cleanup_error(err: Exception) -> bool:
+        s = str(err).lower()
+        return (
+            ("cannot remove file" in s and "permission denied" in s)
+            or ("winerror 32" in s)
+        )
+
+    doc = None
     try:
         import fitz
         import tempfile
         import atexit
-        
+
         logger.info("Full OCR extraction starting...")
-        
+
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
         page_count = len(doc)
-        
+
         # Initialize PaddleX OCR pipeline once
         from paddlex import create_pipeline
+
         pipeline = create_pipeline(pipeline="OCR")
-        
+
         # Track temp files for cleanup
-        temp_files = []
-        
-        all_text = []
+        temp_files: List[str] = []
+
+        all_text: List[str] = []
         for page_num in range(page_count):
             page = doc[page_num]
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            
-            # Save to temp file - don't delete immediately (Windows lock issue)
-            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+
+            # Create a temp path without keeping the file handle open (Windows)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             tmp_path = tmp.name
-            pix.save(tmp_path)
             tmp.close()
+
+            pix.save(tmp_path)
             temp_files.append(tmp_path)
-            
-            output = pipeline.predict(tmp_path)
-            
-            # Extract text from results
-            page_lines = []
-            for result in output:
-                if hasattr(result, 'rec_texts') and result.rec_texts:
-                    page_lines.extend(result.rec_texts)
-            
+
+            page_lines: List[str] = []
+            try:
+                output = pipeline.predict(tmp_path)
+                for result in output:
+                    if hasattr(result, "rec_texts") and result.rec_texts:
+                        page_lines.extend(result.rec_texts)
+            except Exception as e:
+                if _is_nonfatal_temp_cleanup_error(e):
+                    logger.warning(f"OCR temp cleanup error ignored for {tmp_path}: {e}")
+                else:
+                    raise
+
             if page_lines:
                 page_text = "\n".join(page_lines)
                 all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
-        
-        doc.close()
-        
+
         # Register cleanup for all temp files at exit
-        def cleanup():
+        def cleanup() -> None:
             import os
+
             for f in temp_files:
                 try:
                     if os.path.exists(f):
                         os.unlink(f)
-                except:
+                except Exception:
                     pass
+
         atexit.register(cleanup)
-        
+
         return "\n\n".join(all_text), page_count
-        
+
     except ImportError as e:
         logger.warning(f"OCR dependencies not available: {e}")
         return "[OCR REQUIRED - Dependencies not installed]", 0
     except Exception as e:
         logger.error(f"Full OCR failed: {e}")
         return f"[OCR FAILED: {str(e)}]", 0
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
 
 
 def _extract_full_docx(file_bytes: io.BytesIO) -> Tuple[str, int]:
