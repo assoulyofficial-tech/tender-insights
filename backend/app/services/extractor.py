@@ -337,13 +337,11 @@ def _is_pdf_scanned(file_bytes: io.BytesIO) -> Tuple[bool, str]:
 
 
 def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
-    """OCR only the first page of a scanned PDF"""
+    """OCR only the first page of a scanned PDF using PaddleX OCR pipeline"""
     try:
-        from paddleocr import PaddleOCR
         import fitz  # PyMuPDF
-        
-        # Initialize PaddleOCR - only use_angle_cls and lang are universally supported
-        ocr = PaddleOCR(use_angle_cls=True, lang='fr')
+        import tempfile
+        import os
         
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
@@ -352,17 +350,38 @@ def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
             doc.close()
             return ""
         
-        # Only first page
+        # Only first page - save as temp image
         page = doc[0]
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img_bytes = pix.tobytes("png")
         
-        result = ocr.ocr(img_bytes, cls=True)
+        # Save to temp file for PaddleX
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            pix.save(tmp.name)
+            tmp_path = tmp.name
+        
         doc.close()
         
-        if result and result[0]:
-            return "\n".join([line[1][0] for line in result[0]])
-        return ""
+        try:
+            # Use PaddleX OCR pipeline
+            from paddlex import create_pipeline
+            
+            pipeline = create_pipeline(pipeline="OCR")
+            output = pipeline.predict(tmp_path)
+            
+            # Extract text from results
+            text_lines = []
+            for result in output:
+                if hasattr(result, 'rec_texts') and result.rec_texts:
+                    text_lines.extend(result.rec_texts)
+            
+            return "\n".join(text_lines)
+            
+        finally:
+            # Cleanup temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
         
     except ImportError as e:
         logger.warning(f"OCR dependencies not available: {e}")
@@ -673,31 +692,49 @@ def _extract_full_pdf_digital(file_bytes: io.BytesIO) -> Tuple[str, int]:
 
 
 def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
-    """Full OCR extraction from scanned PDF"""
+    """Full OCR extraction from scanned PDF using PaddleX OCR pipeline"""
     try:
-        from paddleocr import PaddleOCR
         import fitz
+        import tempfile
+        import os
         
         logger.info("Full OCR extraction starting...")
-        
-        # Initialize PaddleOCR - only use_angle_cls and lang are universally supported
-        ocr = PaddleOCR(use_angle_cls=True, lang='fr')
         
         file_bytes.seek(0)
         doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
         page_count = len(doc)
         
+        # Initialize PaddleX OCR pipeline once
+        from paddlex import create_pipeline
+        pipeline = create_pipeline(pipeline="OCR")
+        
         all_text = []
         for page_num in range(page_count):
             page = doc[page_num]
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            img_bytes = pix.tobytes("png")
             
-            result = ocr.ocr(img_bytes, cls=True)
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                pix.save(tmp.name)
+                tmp_path = tmp.name
             
-            if result and result[0]:
-                page_text = "\n".join([line[1][0] for line in result[0]])
-                all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            try:
+                output = pipeline.predict(tmp_path)
+                
+                # Extract text from results
+                page_lines = []
+                for result in output:
+                    if hasattr(result, 'rec_texts') and result.rec_texts:
+                        page_lines.extend(result.rec_texts)
+                
+                if page_lines:
+                    page_text = "\n".join(page_lines)
+                    all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
         
         doc.close()
         return "\n\n".join(all_text), page_count
