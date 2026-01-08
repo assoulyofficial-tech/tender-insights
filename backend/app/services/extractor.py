@@ -510,7 +510,16 @@ def extract_first_page(filename: str, file_bytes: io.BytesIO, use_ai_classificat
     file_size = file_bytes.tell()
     file_bytes.seek(0)
     
-    mime_type = detect_mime_type(filename)
+    # Determine MIME type from extension
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    mime_map = {
+        'pdf': 'application/pdf',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'doc': 'application/msword',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls': 'application/vnd.ms-excel',
+    }
+    mime_type = mime_map.get(ext, 'application/octet-stream')
     ext = filename.lower().split('.')[-1] if '.' in filename else ''
     
     is_scanned = False
