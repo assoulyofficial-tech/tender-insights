@@ -337,86 +337,46 @@ def _is_pdf_scanned(file_bytes: io.BytesIO) -> Tuple[bool, str]:
 
 
 def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
-    """OCR only the first page of a scanned PDF using PaddleX OCR pipeline.
-
-    NOTE: On Windows, PaddleX sometimes tries to delete the input image while it is still
-    locked, raising a "cannot remove file ... Permission denied" error. That cleanup error
-    is non-fatal for our use case, so we ignore it and keep the extracted text.
+    """OCR only the first page of a scanned PDF using Tesseract OCR.
+    
+    Uses pdf2image (Poppler) to convert PDF page to image, then pytesseract for OCR.
     """
-
-    def _is_nonfatal_temp_cleanup_error(err: Exception) -> bool:
-        s = str(err).lower()
-        return (
-            ("cannot remove file" in s and "permission denied" in s)
-            or ("winerror 32" in s)  # file in use
-        )
-
-    doc = None
     try:
-        import fitz  # PyMuPDF
-        import tempfile
-        import atexit
-
+        import pytesseract
+        from pdf2image import convert_from_bytes
+        
+        # Configure Tesseract path for Windows
+        import os
+        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        
         file_bytes.seek(0)
-        doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
-
-        if len(doc) == 0:
+        pdf_bytes = file_bytes.read()
+        
+        # Convert only first page to image (300 DPI for good OCR quality)
+        images = convert_from_bytes(
+            pdf_bytes,
+            first_page=1,
+            last_page=1,
+            dpi=300,
+            poppler_path=r"C:\poppler-24.08.0\Library\bin"
+        )
+        
+        if not images:
             return ""
-
-        # Only first page - render to an image
-        page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-
-        # Create a temp path without keeping the file handle open (Windows)
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-
-        pix.save(tmp_path)
-
-        # Register cleanup for later (when file is no longer locked)
-        def cleanup() -> None:
-            try:
-                import os
-
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except Exception:
-                pass
-
-        atexit.register(cleanup)
-
-        # OCR
-        from paddlex import create_pipeline
-
-        pipeline = create_pipeline(pipeline="OCR")
-
-        text_lines: List[str] = []
-        try:
-            output = pipeline.predict(tmp_path)
-            for result in output:
-                if hasattr(result, "rec_texts") and result.rec_texts:
-                    text_lines.extend(result.rec_texts)
-        except Exception as e:
-            if _is_nonfatal_temp_cleanup_error(e):
-                logger.warning(f"OCR temp cleanup error ignored for {tmp_path}: {e}")
-            else:
-                raise
-
-        return "\n".join(text_lines)
-
+        
+        # OCR the first page image
+        text = pytesseract.image_to_string(images[0], lang='fra+ara+eng')
+        
+        return text.strip()
+        
     except ImportError as e:
         logger.warning(f"OCR dependencies not available: {e}")
         return "[OCR REQUIRED]"
     except Exception as e:
         logger.error(f"First-page OCR failed: {e}")
         return ""
-    finally:
-        try:
-            if doc is not None:
-                doc.close()
-        except Exception:
-            pass
 
 
 
@@ -721,82 +681,42 @@ def _extract_full_pdf_digital(file_bytes: io.BytesIO) -> Tuple[str, int]:
 
 
 def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
-    """Full OCR extraction from scanned PDF using PaddleX OCR pipeline.
-
-    On Windows, PaddleX may raise a non-fatal exception when trying to delete temp images
-    ("cannot remove file ... Permission denied"). We treat that as a warning and keep
-    extracted text.
+    """Full OCR extraction from scanned PDF using Tesseract OCR.
+    
+    Uses pdf2image (Poppler) to convert PDF pages to images, then pytesseract for OCR.
     """
-
-    def _is_nonfatal_temp_cleanup_error(err: Exception) -> bool:
-        s = str(err).lower()
-        return (
-            ("cannot remove file" in s and "permission denied" in s)
-            or ("winerror 32" in s)
-        )
-
-    doc = None
     try:
-        import fitz
-        import tempfile
-        import atexit
-
-        logger.info("Full OCR extraction starting...")
-
+        import pytesseract
+        from pdf2image import convert_from_bytes
+        import os
+        
+        # Configure Tesseract path for Windows
+        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        
+        logger.info("Full OCR extraction starting (Tesseract)...")
+        
         file_bytes.seek(0)
-        doc = fitz.open(stream=file_bytes.read(), filetype="pdf")
-        page_count = len(doc)
-
-        # Initialize PaddleX OCR pipeline once
-        from paddlex import create_pipeline
-
-        pipeline = create_pipeline(pipeline="OCR")
-
-        # Track temp files for cleanup
-        temp_files: List[str] = []
-
+        pdf_bytes = file_bytes.read()
+        
+        # Convert all pages to images (300 DPI for good OCR quality)
+        images = convert_from_bytes(
+            pdf_bytes,
+            dpi=300,
+            poppler_path=r"C:\poppler-24.08.0\Library\bin"
+        )
+        
+        page_count = len(images)
         all_text: List[str] = []
-        for page_num in range(page_count):
-            page = doc[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-
-            # Create a temp path without keeping the file handle open (Windows)
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            tmp_path = tmp.name
-            tmp.close()
-
-            pix.save(tmp_path)
-            temp_files.append(tmp_path)
-
-            page_lines: List[str] = []
-            try:
-                output = pipeline.predict(tmp_path)
-                for result in output:
-                    if hasattr(result, "rec_texts") and result.rec_texts:
-                        page_lines.extend(result.rec_texts)
-            except Exception as e:
-                if _is_nonfatal_temp_cleanup_error(e):
-                    logger.warning(f"OCR temp cleanup error ignored for {tmp_path}: {e}")
-                else:
-                    raise
-
-            if page_lines:
-                page_text = "\n".join(page_lines)
-                all_text.append(f"--- Page {page_num + 1} ---\n{page_text}")
-
-        # Register cleanup for all temp files at exit
-        def cleanup() -> None:
-            import os
-
-            for f in temp_files:
-                try:
-                    if os.path.exists(f):
-                        os.unlink(f)
-                except Exception:
-                    pass
-
-        atexit.register(cleanup)
-
+        
+        for page_num, image in enumerate(images):
+            # OCR each page (French + Arabic + English)
+            page_text = pytesseract.image_to_string(image, lang='fra+ara+eng')
+            
+            if page_text.strip():
+                all_text.append(f"--- Page {page_num + 1} ---\n{page_text.strip()}")
+        
         return "\n\n".join(all_text), page_count
 
     except ImportError as e:
