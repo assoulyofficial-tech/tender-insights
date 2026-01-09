@@ -897,12 +897,96 @@ def classify_all_documents(zip_files: Dict[str, io.BytesIO]) -> List[FirstPageRe
     return results
 
 
+def _is_french_document(filename: str, first_page_text: str) -> bool:
+    """
+    Check if document is French version based on filename and content.
+    Uses strict patterns to avoid false positives.
+    """
+    filename_lower = filename.lower()
+    text_lower = first_page_text.lower() if first_page_text else ""
+    
+    # Strict filename patterns for French (word boundaries)
+    french_filename_patterns = [
+        r'[\s_\-\.]fr[\s_\-\.]',      # _fr_ or -fr- or .fr.
+        r'[\s_\-\.]fr$',              # ends with _fr or -fr
+        r'^fr[\s_\-\.]',              # starts with fr_ or fr-
+        r'[\s_\-]français',           # _français
+        r'[\s_\-]francais',           # _francais
+        r'[\s_\-]french',             # _french
+        r'\(fr\)',                    # (fr)
+        r'\[fr\]',                    # [fr]
+        r'version[\s_\-]*fr',         # version fr
+    ]
+    
+    for pattern in french_filename_patterns:
+        if re.search(pattern, filename_lower):
+            return True
+    
+    # Check content for French language indicators
+    french_content_markers = [
+        'règlement de consultation',
+        'cahier des prescriptions',
+        'avis d\'appel d\'offres',
+        'marché public',
+        'le soumissionnaire',
+        'pièces justificatives',
+    ]
+    
+    if text_lower:
+        french_score = sum(1 for marker in french_content_markers if marker in text_lower)
+        if french_score >= 2:
+            return True
+    
+    return False
+
+
+def _is_arabic_document(filename: str, first_page_text: str) -> bool:
+    """
+    Check if document is Arabic version based on filename and content.
+    Uses strict patterns to avoid false positives.
+    """
+    filename_lower = filename.lower()
+    text_lower = first_page_text.lower() if first_page_text else ""
+    
+    # Strict filename patterns for Arabic (word boundaries)
+    arabic_filename_patterns = [
+        r'[\s_\-\.]ar[\s_\-\.]',      # _ar_ or -ar- or .ar.
+        r'[\s_\-\.]ar$',              # ends with _ar or -ar
+        r'^ar[\s_\-\.]',              # starts with ar_ or ar-
+        r'[\s_\-]arabe',              # _arabe
+        r'[\s_\-]arabic',             # _arabic
+        r'\(ar\)',                    # (ar)
+        r'\[ar\]',                    # [ar]
+        r'version[\s_\-]*ar',         # version ar
+        r'عربي',                      # Arabic word for "Arabic"
+        r'العربية',                   # Arabic for "Arabic language"
+    ]
+    
+    for pattern in arabic_filename_patterns:
+        if re.search(pattern, filename_lower):
+            return True
+    
+    # Check for Arabic script in content (significant presence)
+    if first_page_text:
+        arabic_chars = len(re.findall(r'[\u0600-\u06FF]', first_page_text))
+        latin_chars = len(re.findall(r'[a-zA-Z]', first_page_text))
+        # If Arabic chars dominate, it's an Arabic document
+        if arabic_chars > latin_chars and arabic_chars > 50:
+            return True
+    
+    return False
+
+
 def find_avis_document(classifications: List[FirstPageResult]) -> Optional[FirstPageResult]:
     """
     STEP 2: Find the Avis de Consultation from classification results.
     Returns the Avis document info, or None if not found.
     
-    PRIORITY: French version > Arabic version > any other AVIS
+    PRIORITY: 
+    1. Explicitly marked French version
+    2. Document with French content (not Arabic)
+    3. Any non-Arabic version
+    4. Arabic version (only if no other option)
     """
     avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
     
@@ -910,24 +994,43 @@ def find_avis_document(classifications: List[FirstPageResult]) -> Optional[First
         logger.warning("No Avis document found in ZIP")
         return None
     
-    # Priority 1: French version (look for FR, français, french in filename)
-    french_indicators = ['fr', 'français', 'francais', 'french']
+    logger.info(f"Found {len(avis_candidates)} Avis candidates, selecting best version...")
+    
+    # Categorize candidates
+    french_docs = []
+    arabic_docs = []
+    neutral_docs = []
+    
     for avis in avis_candidates:
-        filename_lower = avis.filename.lower()
-        if any(ind in filename_lower for ind in french_indicators):
-            logger.success(f"Found French Avis document: {avis.filename}")
-            return avis
+        is_french = _is_french_document(avis.filename, avis.first_page_text)
+        is_arabic = _is_arabic_document(avis.filename, avis.first_page_text)
+        
+        logger.debug(f"  {avis.filename}: french={is_french}, arabic={is_arabic}")
+        
+        if is_french and not is_arabic:
+            french_docs.append(avis)
+        elif is_arabic and not is_french:
+            arabic_docs.append(avis)
+        else:
+            neutral_docs.append(avis)
     
-    # Priority 2: Exclude Arabic version if there are multiple candidates
-    arabic_indicators = ['ar', 'arabe', 'arabic', 'عربي']
-    if len(avis_candidates) > 1:
-        non_arabic = [a for a in avis_candidates if not any(ind in a.filename.lower() for ind in arabic_indicators)]
-        if non_arabic:
-            logger.success(f"Found non-Arabic Avis document: {non_arabic[0].filename}")
-            return non_arabic[0]
+    # Priority 1: Explicit French documents
+    if french_docs:
+        logger.success(f"Selected French Avis: {french_docs[0].filename}")
+        return french_docs[0]
     
-    # Fallback: Return first available
-    logger.success(f"Found Avis document: {avis_candidates[0].filename}")
+    # Priority 2: Neutral documents (not marked as Arabic)
+    if neutral_docs:
+        logger.success(f"Selected neutral Avis (not Arabic): {neutral_docs[0].filename}")
+        return neutral_docs[0]
+    
+    # Priority 3: Arabic documents (only if no other choice)
+    if arabic_docs:
+        logger.warning(f"Only Arabic Avis available: {arabic_docs[0].filename}")
+        return arabic_docs[0]
+    
+    # Fallback (shouldn't reach here)
+    logger.success(f"Fallback Avis: {avis_candidates[0].filename}")
     return avis_candidates[0]
 
 
