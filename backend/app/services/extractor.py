@@ -337,42 +337,47 @@ def _is_pdf_scanned(file_bytes: io.BytesIO) -> Tuple[bool, str]:
 
 
 def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
-    """OCR only the first page of a scanned PDF using external PaddleOCR service.
+    """OCR only the first page of a scanned PDF using Tesseract.
     
-    Calls the PaddleOCR REST API running on localhost:8765.
+    Uses pytesseract with pdf2image for conversion.
     """
-    import requests
+    import pytesseract
+    from pdf2image import convert_from_bytes
     
-    PADDLEOCR_SERVICE_URL = "http://localhost:8765"
+    # Configure Tesseract path (Windows)
+    TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    POPPLER_PATH = r"C:\poppler-24.08.0\Library\bin"
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
     
     try:
         file_bytes.seek(0)
         pdf_bytes = file_bytes.read()
         
-        # Call external PaddleOCR service
-        response = requests.post(
-            f"{PADDLEOCR_SERVICE_URL}/ocr/pdf/first-page",
-            files={"file": ("document.pdf", pdf_bytes, "application/pdf")},
-            timeout=180  # Increased timeout for OCR
+        # Convert first page to image
+        logger.info("Converting first page to image...")
+        images = convert_from_bytes(
+            pdf_bytes, 
+            dpi=200, 
+            first_page=1, 
+            last_page=1,
+            poppler_path=POPPLER_PATH
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success"):
-                return result.get("text", "").strip()
-            else:
-                logger.error(f"PaddleOCR service error: {result.get('error')}")
-                return ""
-        else:
-            logger.error(f"PaddleOCR service returned {response.status_code}")
+        if not images:
+            logger.error("Could not convert PDF first page to image")
             return ""
         
-    except requests.exceptions.ConnectionError:
-        logger.error("PaddleOCR service not running. Start it with: cd paddleocr_service && python server.py")
-        return "[OCR SERVICE NOT AVAILABLE]"
-    except requests.exceptions.Timeout:
-        logger.error("PaddleOCR service timeout")
-        return "[OCR TIMEOUT]"
+        # Run Tesseract OCR
+        logger.info("Running Tesseract OCR on first page...")
+        text = pytesseract.image_to_string(
+            images[0], 
+            lang="fra+ara+eng",
+            config="--oem 3 --psm 3"
+        )
+        
+        logger.info(f"OCR extracted {len(text)} chars from first page")
+        return text.strip()
+        
     except Exception as e:
         logger.error(f"First-page OCR failed: {e}")
         return ""
@@ -680,47 +685,51 @@ def _extract_full_pdf_digital(file_bytes: io.BytesIO) -> Tuple[str, int]:
 
 
 def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
-    """Full OCR extraction from scanned PDF using external PaddleOCR service.
+    """Full OCR extraction from scanned PDF using Tesseract.
     
-    Calls the PaddleOCR REST API running on localhost:8765.
+    Uses pytesseract with pdf2image for conversion.
     """
-    import requests
+    import pytesseract
+    from pdf2image import convert_from_bytes
     
-    PADDLEOCR_SERVICE_URL = "http://localhost:8765"
+    # Configure Tesseract path (Windows)
+    TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    POPPLER_PATH = r"C:\poppler-24.08.0\Library\bin"
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
     
     try:
-        logger.info("Full OCR extraction starting (PaddleOCR service)...")
+        logger.info("Full OCR extraction starting (Tesseract)...")
         
         file_bytes.seek(0)
         pdf_bytes = file_bytes.read()
         
-        # Call external PaddleOCR service
-        response = requests.post(
-            f"{PADDLEOCR_SERVICE_URL}/ocr/pdf",
-            files={"file": ("document.pdf", pdf_bytes, "application/pdf")},
-            timeout=300  # 5 min timeout for large PDFs
+        # Convert all pages to images
+        logger.info("Converting PDF to images...")
+        images = convert_from_bytes(
+            pdf_bytes, 
+            dpi=200,
+            poppler_path=POPPLER_PATH
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success"):
-                text = result.get("text", "")
-                pages = result.get("pages", 0)
-                logger.info(f"OCR completed: {pages} pages in {result.get('processing_time', 0)}s")
-                return text.strip(), pages
-            else:
-                logger.error(f"PaddleOCR service error: {result.get('error')}")
-                return f"[OCR FAILED: {result.get('error')}]", 0
-        else:
-            logger.error(f"PaddleOCR service returned {response.status_code}")
-            return f"[OCR FAILED: HTTP {response.status_code}]", 0
+        if not images:
+            logger.error("Could not convert PDF to images")
+            return "[OCR FAILED: No images extracted]", 0
         
-    except requests.exceptions.ConnectionError:
-        logger.error("PaddleOCR service not running. Start it with: cd paddleocr_service && python server.py")
-        return "[OCR SERVICE NOT AVAILABLE - Start paddleocr_service/server.py]", 0
-    except requests.exceptions.Timeout:
-        logger.error("PaddleOCR service timeout on full PDF")
-        return "[OCR TIMEOUT]", 0
+        logger.info(f"Converted {len(images)} pages, running Tesseract OCR...")
+        
+        all_text = []
+        for i, image in enumerate(images):
+            logger.info(f"OCR page {i + 1}/{len(images)}...")
+            page_text = pytesseract.image_to_string(
+                image, 
+                lang="fra+ara+eng",
+                config="--oem 3 --psm 3"
+            )
+            all_text.append(f"--- Page {i + 1} ---\n{page_text}")
+        
+        logger.info(f"OCR completed: {len(images)} pages")
+        return "\n\n".join(all_text).strip(), len(images)
+        
     except Exception as e:
         logger.error(f"Full OCR failed: {e}")
         return f"[OCR FAILED: {str(e)}]", 0
