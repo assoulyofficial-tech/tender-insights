@@ -92,18 +92,23 @@ def ocr_image():
     try:
         # Read image
         image_bytes = file.read()
+        print(f"[OCR] Received image: {len(image_bytes)} bytes")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        print(f"[OCR] Image size: {image.size}")
         
         # Save to temp file (PaddleOCR requires file path)
         temp_dir = get_temp_dir()
         temp_path = os.path.join(temp_dir, f"ocr_{int(time.time() * 1000)}.png")
         image.save(temp_path)
+        print(f"[OCR] Saved to temp: {temp_path}")
         
         try:
             # Run OCR
             pipeline = get_ocr_pipeline()
+            print(f"[OCR] Running OCR...")
             result = list(pipeline.predict(temp_path))
             text = extract_text_from_result(result)
+            print(f"[OCR] Extracted {len(text)} chars")
             
             return jsonify({
                 "success": True,
@@ -119,9 +124,12 @@ def ocr_image():
                 pass
                 
     except Exception as e:
+        import traceback
+        print(f"[OCR ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": f"{type(e).__name__}: {str(e)}"
         }), 500
 
 
@@ -142,15 +150,19 @@ def ocr_pdf():
         
         # Read PDF
         pdf_bytes = file.read()
+        print(f"[PDF OCR] Received PDF: {len(pdf_bytes)} bytes")
         
         # Convert all pages to images
+        print(f"[PDF OCR] Converting PDF to images...")
         images = convert_from_bytes(pdf_bytes, dpi=200)
+        print(f"[PDF OCR] Converted {len(images)} pages")
         
         all_text = []
         temp_dir = get_temp_dir()
         pipeline = get_ocr_pipeline()
         
         for i, image in enumerate(images):
+            print(f"[PDF OCR] Processing page {i + 1}/{len(images)}...")
             temp_path = os.path.join(temp_dir, f"pdf_page_{i}_{int(time.time() * 1000)}.png")
             image.save(temp_path)
             
@@ -158,6 +170,7 @@ def ocr_pdf():
                 result = list(pipeline.predict(temp_path))
                 page_text = extract_text_from_result(result)
                 all_text.append(f"--- Page {i + 1} ---\n{page_text}")
+                print(f"[PDF OCR] Page {i + 1}: {len(page_text)} chars")
             finally:
                 try:
                     os.unlink(temp_path)
@@ -172,9 +185,12 @@ def ocr_pdf():
         })
         
     except Exception as e:
+        import traceback
+        print(f"[PDF OCR ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": f"{type(e).__name__}: {str(e)}"
         }), 500
 
 
@@ -195,9 +211,12 @@ def ocr_pdf_first_page():
         
         # Read PDF
         pdf_bytes = file.read()
+        print(f"[PDF FIRST] Received PDF: {len(pdf_bytes)} bytes")
         
         # Convert first page only
+        print(f"[PDF FIRST] Converting first page...")
         images = convert_from_bytes(pdf_bytes, dpi=200, first_page=1, last_page=1)
+        print(f"[PDF FIRST] Got {len(images)} image(s)")
         
         if not images:
             return jsonify({"success": False, "error": "Could not extract first page"}), 500
@@ -205,11 +224,14 @@ def ocr_pdf_first_page():
         temp_dir = get_temp_dir()
         temp_path = os.path.join(temp_dir, f"pdf_first_{int(time.time() * 1000)}.png")
         images[0].save(temp_path)
+        print(f"[PDF FIRST] Image size: {images[0].size}, saved to: {temp_path}")
         
         try:
             pipeline = get_ocr_pipeline()
+            print(f"[PDF FIRST] Running OCR...")
             result = list(pipeline.predict(temp_path))
             text = extract_text_from_result(result)
+            print(f"[PDF FIRST] Extracted {len(text)} chars")
             
             return jsonify({
                 "success": True,
@@ -224,9 +246,12 @@ def ocr_pdf_first_page():
                 pass
         
     except Exception as e:
+        import traceback
+        print(f"[PDF FIRST ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": f"{type(e).__name__}: {str(e)}"
         }), 500
 
 
