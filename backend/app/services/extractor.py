@@ -353,7 +353,7 @@ def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
         response = requests.post(
             f"{PADDLEOCR_SERVICE_URL}/ocr/pdf/first-page",
             files={"file": ("document.pdf", pdf_bytes, "application/pdf")},
-            timeout=120
+            timeout=180  # Increased timeout for OCR
         )
         
         if response.status_code == 200:
