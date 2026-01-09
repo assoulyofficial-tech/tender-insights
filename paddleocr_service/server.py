@@ -18,6 +18,9 @@ app = Flask(__name__)
 _ocr_pipeline = None
 _temp_dir = None
 
+# Poppler path for pdf2image (Windows)
+POPPLER_PATH = os.environ.get("POPPLER_PATH", r"C:\poppler-24.08.0\Library\bin")
+
 
 def get_temp_dir():
     """Get or create a dedicated temp directory for OCR."""
@@ -153,8 +156,8 @@ def ocr_pdf():
         print(f"[PDF OCR] Received PDF: {len(pdf_bytes)} bytes")
         
         # Convert all pages to images
-        print(f"[PDF OCR] Converting PDF to images...")
-        images = convert_from_bytes(pdf_bytes, dpi=200)
+        print(f"[PDF OCR] Converting PDF to images (poppler: {POPPLER_PATH})...")
+        images = convert_from_bytes(pdf_bytes, dpi=200, poppler_path=POPPLER_PATH)
         print(f"[PDF OCR] Converted {len(images)} pages")
         
         all_text = []
@@ -214,8 +217,8 @@ def ocr_pdf_first_page():
         print(f"[PDF FIRST] Received PDF: {len(pdf_bytes)} bytes")
         
         # Convert first page only
-        print(f"[PDF FIRST] Converting first page...")
-        images = convert_from_bytes(pdf_bytes, dpi=200, first_page=1, last_page=1)
+        print(f"[PDF FIRST] Converting first page (poppler: {POPPLER_PATH})...")
+        images = convert_from_bytes(pdf_bytes, dpi=200, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
         print(f"[PDF FIRST] Got {len(images)} image(s)")
         
         if not images:
