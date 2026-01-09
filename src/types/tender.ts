@@ -2,7 +2,7 @@
 // Authoritative schemas matching backend PostgreSQL
 
 export type TenderStatus = 'PENDING' | 'LISTED' | 'ANALYZED' | 'ERROR';
-export type TenderType = 'AOON' | 'AOOI' | null;
+export type TenderType = string | null;  // Flexible: AOON, AOOI, AOO, AOR, Consultation, etc.
 export type DocumentType = 'AVIS' | 'RC' | 'CPS' | 'ANNEXE' | 'UNKNOWN';
 
 // Provenance tracking for every extracted field

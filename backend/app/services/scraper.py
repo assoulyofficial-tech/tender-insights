@@ -38,6 +38,15 @@ class ScraperProgress:
 
 
 @dataclass
+class WebsiteMetadata:
+    """Metadata extracted directly from tender webpage (authoritative source)"""
+    reference_tender: Optional[str] = None
+    submission_deadline_date: Optional[str] = None  # DD/MM/YYYY
+    submission_deadline_time: Optional[str] = None  # HH:MM
+    subject: Optional[str] = None
+
+
+@dataclass
 class DownloadedTender:
     """In-memory tender download result"""
     index: int
@@ -47,6 +56,8 @@ class DownloadedTender:
     # In-memory ZIP content
     zip_bytes: Optional[bytes] = None
     suggested_filename: str = ""
+    # Website metadata (authoritative for reference, deadline, subject)
+    website_metadata: Optional[WebsiteMetadata] = None
     
     def get_files(self) -> Dict[str, io.BytesIO]:
         """Extract files from ZIP to memory"""
@@ -187,6 +198,52 @@ class TenderScraper:
         self.progress.log("success", f"Found {len(tender_links)} tender links")
         return tender_links
     
+    async def extract_website_metadata(self, page) -> WebsiteMetadata:
+        """
+        Extract metadata directly from tender HTML page (page de consultation).
+        This data is AUTHORITATIVE and overrides document values.
+        
+        HTML selectors:
+        - Reference: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference
+        - Deadline: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_dateHeureLimiteRemisePlis
+        - Subject: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_objet
+        """
+        metadata = WebsiteMetadata()
+        
+        try:
+            # Extract reference
+            ref_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference'
+            ref_element = await page.query_selector(ref_selector)
+            if ref_element:
+                metadata.reference_tender = await ref_element.inner_text()
+                logger.debug(f"Extracted reference: {metadata.reference_tender}")
+            
+            # Extract deadline (format: DD/MM/YYYY HH:MM)
+            deadline_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_dateHeureLimiteRemisePlis'
+            deadline_element = await page.query_selector(deadline_selector)
+            if deadline_element:
+                deadline_text = await deadline_element.inner_text()
+                if deadline_text:
+                    # Parse "DD/MM/YYYY HH:MM" format
+                    parts = deadline_text.strip().split(' ')
+                    if len(parts) >= 1:
+                        metadata.submission_deadline_date = parts[0]  # DD/MM/YYYY
+                    if len(parts) >= 2:
+                        metadata.submission_deadline_time = parts[1]  # HH:MM
+                    logger.debug(f"Extracted deadline: {deadline_text}")
+            
+            # Extract subject
+            subject_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_objet'
+            subject_element = await page.query_selector(subject_selector)
+            if subject_element:
+                metadata.subject = await subject_element.inner_text()
+                logger.debug(f"Extracted subject: {metadata.subject[:100] if metadata.subject else 'None'}...")
+                
+        except Exception as e:
+            logger.warning(f"Failed to extract website metadata: {e}")
+        
+        return metadata
+    
     async def download_single_tender(
         self,
         context,
@@ -195,16 +252,17 @@ class TenderScraper:
         semaphore: asyncio.Semaphore
     ) -> DownloadedTender:
         """
-        Download a single tender to memory
+        Download a single tender to memory and extract website metadata
         
         Returns:
-            DownloadedTender with ZIP bytes in memory
+            DownloadedTender with ZIP bytes in memory and website metadata
         """
         async with semaphore:
             if self._stop_requested:
                 return DownloadedTender(idx, tender_url, False, "Stopped by user")
             
             tender_page = None
+            website_metadata = None
             try:
                 tender_page = await context.new_page()
                 
@@ -213,6 +271,9 @@ class TenderScraper:
                     tender_url, 
                     timeout=settings.SCRAPER_TIMEOUT_PAGE
                 )
+                
+                # Extract website metadata BEFORE clicking download
+                website_metadata = await self.extract_website_metadata(tender_page)
                 
                 # Click download button
                 await tender_page.click(
@@ -274,9 +335,10 @@ class TenderScraper:
                     zip_bytes = await download.read_bytes() if hasattr(download, 'read_bytes') else None
                 
                 self.progress.downloaded += 1
+                ref_display = website_metadata.reference_tender if website_metadata and website_metadata.reference_tender else f"tender_{idx}"
                 self.progress.log(
                     "success", 
-                    f"Downloaded: tender_{idx}_{download.suggested_filename[:30]}"
+                    f"Downloaded: {ref_display} ({download.suggested_filename[:30]})"
                 )
                 self._update_progress()
                 
@@ -285,7 +347,8 @@ class TenderScraper:
                     url=tender_url,
                     success=True,
                     zip_bytes=zip_bytes,
-                    suggested_filename=download.suggested_filename
+                    suggested_filename=download.suggested_filename,
+                    website_metadata=website_metadata
                 )
                 
             except PlaywrightTimeout as e:
