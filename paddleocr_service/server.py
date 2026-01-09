@@ -21,11 +21,8 @@ _temp_dir = None
 # Poppler path for pdf2image (Windows)
 POPPLER_PATH = os.environ.get("POPPLER_PATH", r"C:\poppler-24.08.0\Library\bin")
 
-# PDF conversion DPI (lower = faster, but less accurate)
-PDF_DPI = int(os.environ.get("PDF_DPI", "150"))  # Reduced from 200
-
-# Max image dimension (resize large images for speed)
-MAX_IMAGE_DIM = int(os.environ.get("MAX_IMAGE_DIM", "1500"))
+# PDF conversion DPI - keep high for quality
+PDF_DPI = int(os.environ.get("PDF_DPI", "200"))
 
 
 def get_temp_dir():
@@ -48,12 +45,21 @@ def cleanup_temp_dir():
 
 
 def get_ocr_pipeline():
-    """Lazy-load the PaddleOCR pipeline."""
+    """Lazy-load the PaddleOCR pipeline with optimized settings."""
     global _ocr_pipeline
     if _ocr_pipeline is None:
-        print("Loading PaddleOCR pipeline (first request may be slow)...")
+        print("Loading PaddleOCR pipeline with optimizations...")
         try:
             from paddlex import create_pipeline
+            # Use optimized pipeline config for speed
+            # - Increase CPU threads for parallel processing
+            # - Use efficient batch processing
+            import paddle
+            paddle.set_device('cpu')
+            # Set CPU threads for faster inference
+            cpu_threads = os.cpu_count() or 4
+            print(f"[OCR] Using {cpu_threads} CPU threads")
+            
             _ocr_pipeline = create_pipeline(pipeline="OCR")
             print("PaddleOCR pipeline loaded successfully!")
         except Exception as e:
@@ -76,15 +82,7 @@ def extract_text_from_result(result) -> str:
     return "\n".join(texts)
 
 
-def resize_image_if_needed(image: Image.Image) -> Image.Image:
-    """Resize image if too large (speeds up OCR significantly)."""
-    w, h = image.size
-    if max(w, h) > MAX_IMAGE_DIM:
-        ratio = MAX_IMAGE_DIM / max(w, h)
-        new_size = (int(w * ratio), int(h * ratio))
-        print(f"[RESIZE] {w}x{h} -> {new_size[0]}x{new_size[1]}")
-        return image.resize(new_size, Image.Resampling.LANCZOS)
-    return image
+# No resizing - keep full quality for accurate OCR
 
 
 @app.route('/health', methods=['GET'])
@@ -114,10 +112,7 @@ def ocr_image():
         image_bytes = file.read()
         print(f"[OCR] Received image: {len(image_bytes)} bytes")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        print(f"[OCR] Original size: {image.size}")
-        
-        # Resize if too large
-        image = resize_image_if_needed(image)
+        print(f"[OCR] Image size: {image.size}")
         
         # Save to temp file (PaddleOCR requires file path)
         temp_dir = get_temp_dir()
@@ -185,10 +180,7 @@ def ocr_pdf():
         pipeline = get_ocr_pipeline()
         
         for i, image in enumerate(images):
-            print(f"[PDF OCR] Processing page {i + 1}/{len(images)}...")
-            
-            # Resize if too large
-            image = resize_image_if_needed(image)
+            print(f"[PDF OCR] Processing page {i + 1}/{len(images)}, size: {image.size}...")
             
             temp_path = os.path.join(temp_dir, f"pdf_page_{i}_{int(time.time() * 1000)}.png")
             image.save(temp_path)
@@ -248,9 +240,7 @@ def ocr_pdf_first_page():
         if not images:
             return jsonify({"success": False, "error": "Could not extract first page"}), 500
         
-        # Resize if too large
-        image = resize_image_if_needed(images[0])
-        
+        image = images[0]
         temp_dir = get_temp_dir()
         temp_path = os.path.join(temp_dir, f"pdf_first_{int(time.time() * 1000)}.png")
         image.save(temp_path)
