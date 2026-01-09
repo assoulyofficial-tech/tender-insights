@@ -112,7 +112,7 @@ backend/
 
 - **Headless scraping**: No GUI, runs on servers
 - **Memory-only**: All file processing in `io.BytesIO`, no disk writes
-- **OCR support**: PaddleOCR for scanned PDFs (CPU mode)
+- **OCR support**: Tesseract OCR for scanned PDFs (requires Tesseract + Poppler installed)
 - **AI extraction**: DeepSeek API for metadata extraction
 - **Full traceability**: Every field tracks its source document
 
