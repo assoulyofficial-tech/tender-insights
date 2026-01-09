@@ -899,14 +899,34 @@ def find_avis_document(classifications: List[FirstPageResult]) -> Optional[First
     """
     STEP 2: Find the Avis de Consultation from classification results.
     Returns the Avis document info, or None if not found.
-    """
-    for result in classifications:
-        if result.success and result.document_type == DocumentType.AVIS:
-            logger.success(f"Found Avis document: {result.filename}")
-            return result
     
-    logger.warning("No Avis document found in ZIP")
-    return None
+    PRIORITY: French version > Arabic version > any other AVIS
+    """
+    avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
+    
+    if not avis_candidates:
+        logger.warning("No Avis document found in ZIP")
+        return None
+    
+    # Priority 1: French version (look for FR, français, french in filename)
+    french_indicators = ['fr', 'français', 'francais', 'french']
+    for avis in avis_candidates:
+        filename_lower = avis.filename.lower()
+        if any(ind in filename_lower for ind in french_indicators):
+            logger.success(f"Found French Avis document: {avis.filename}")
+            return avis
+    
+    # Priority 2: Exclude Arabic version if there are multiple candidates
+    arabic_indicators = ['ar', 'arabe', 'arabic', 'عربي']
+    if len(avis_candidates) > 1:
+        non_arabic = [a for a in avis_candidates if not any(ind in a.filename.lower() for ind in arabic_indicators)]
+        if non_arabic:
+            logger.success(f"Found non-Arabic Avis document: {non_arabic[0].filename}")
+            return non_arabic[0]
+    
+    # Fallback: Return first available
+    logger.success(f"Found Avis document: {avis_candidates[0].filename}")
+    return avis_candidates[0]
 
 
 def extract_avis_only(
