@@ -38,255 +38,26 @@ class AvisMetadata:
     keywords: Dict[str, List[str]]
 
 
-# System prompt for Avis extraction (Phase 1) - French language
-AVIS_EXTRACTION_PROMPT = """Tu es un moteur d'extraction déterministe pour les documents de marchés publics marocains (Avis de consultation).
-
-## MODE OPÉRATOIRE STRICT
-
-Tu NE DOIS PAS:
-- Inférer des données manquantes
-- Deviner des valeurs
-- Normaliser les devises
-- Traduire le texte
-- Résumer les descriptions techniques
-- Inventer des lots, articles, délais ou pourcentages
-
-Si une valeur n'est pas explicitement indiquée: retourne null. Sans exception.
-
-## TÂCHE D'EXTRACTION
-
-Extrait les champs suivants du document Avis. Chaque champ doit inclure le suivi de provenance.
-
-## SCHÉMA DE SORTIE (JSON)
-
-```json
-{
-  "reference_tender": {
-    "value": "<chaîne de référence exacte ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "tender_type": {
-    "value": "<type exact tel qu'indiqué dans le document ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "issuing_institution": {
-    "value": "<nom légal complet ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "submission_deadline": {
-    "date": {
-      "value": "<JJ/MM/AAAA ou null>",
-      "source_document": "AVIS",
-      "source_date": null
-    },
-    "time": {
-      "value": "<HH:MM ou null>",
-      "source_document": "AVIS",
-      "source_date": null
-    }
-  },
-  "folder_opening_location": {
-    "value": "<lieu ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "subject": {
-    "value": "<texte complet du sujet ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "total_estimated_value": {
-    "value": "<montant avec devise ou null>",
-    "currency": "<MAD ou autre ou null>",
-    "source_document": "AVIS",
-    "source_date": null
-  },
-  "lots": [
-    {
-      "lot_number": "<numéro ou null>",
-      "lot_subject": "<sujet ou null>",
-      "lot_estimated_value": "<valeur ou null>",
-      "caution_provisoire": "<montant ou null>"
-    }
-  ],
-  "keywords": {
-    "keywords_fr": ["<10 mots-clés français extraits du sujet>"],
-    "keywords_eng": ["<10 traductions anglaises des mots-clés>"],
-    "keywords_ar": ["<10 traductions arabes des mots-clés>"]
-  }
-}
-```
-
-## RÈGLES POUR LE TYPE D'APPEL D'OFFRES (tender_type)
-
-Le type d'appel d'offres peut inclure plusieurs formes, notamment:
-- AOON (Appel d'Offres Ouvert National)
-- AOOI (Appel d'Offres Ouvert International)
-- AOO (Appel d'Offres Ouvert)
-- AOR (Appel d'Offres Restreint)
-- Consultation (Consultation de prix)
-- Marché négocié
-- Concours
-- Et tout autre type mentionné dans le document
-
-Extrait le type EXACTEMENT tel qu'il apparaît dans le document. Ne normalise PAS.
-
-## RÈGLES DE GÉNÉRATION DES MOTS-CLÉS
-
-Génère exactement 10 mots-clés par langue basés sur:
-- Le sujet du marché
-- Les articles techniques mentionnés
-- Les termes spécifiques au secteur
-
-Les mots-clés alimentent le moteur de recherche. N'invente pas de concepts absents du document.
-
-## RÈGLES D'EXTRACTION
-
-1. Préserve exactement la formulation originale
-2. Ne nettoie ni ne normalise les numéros de référence
-3. Si l'information sur les lots est partielle, extrait ce qui existe
-4. Si aucun lot n'est explicitement numéroté, retourne un tableau vide
-5. tender_type doit être exactement comme indiqué dans le document, ou null si non spécifié
-
-Retourne UNIQUEMENT l'objet JSON, sans explications.
+# Lazy-loaded prompts from external files to avoid encoding issues
+AVIS_EXTRACTION_PROMPT = None
+UNIVERSAL_EXTRACTION_PROMPT = None
+ASK_AI_PROMPT = None
 
 
-# System prompt for deep analysis (Phase 2)
-UNIVERSAL_EXTRACTION_PROMPT = """You are a legal-technical extraction engine for Moroccan government tender documents.
+def get_avis_extraction_prompt() -> str:
+    """Get the AVIS_EXTRACTION_PROMPT, loading from file if needed"""
+    global AVIS_EXTRACTION_PROMPT
+    if AVIS_EXTRACTION_PROMPT is None:
+        AVIS_EXTRACTION_PROMPT = _load_prompt("avis_extraction_prompt.txt")
+    return AVIS_EXTRACTION_PROMPT
 
-## OPERATING MODE: STRICT EXTRACTION
 
-You MUST NOT:
-- Hallucinate any data
-- Infer missing values
-- Guess percentages or amounts
-- Merge unrelated lots
-- Simplify technical specifications
-- Translate text
-
-Si quelque chose manque -> null.
-Si quelque chose n'est pas clair -> null.
-
-## INPUT DOCUMENTS PRIORITY (AUTHORITATIVE ORDER)
-
-1. Latest Annexe (highest authority - overrides all previous values)
-2. CPS (Cahier des Prescriptions Spéciales)
-3. RC (Règlement de Consultation)  
-4. Avis (lowest authority)
-
-For each field, prefer the most recent explicit statement from the highest-priority document.
-
-## ANNEX HANDLING RULES
-
-Annexes modify previous documents. When processing:
-1. Identify annex date/version if stated
-2. Later annexes override earlier ones
-3. If an annex explicitly modifies a field, use the annex value
-4. Unchanged fields retain their original source
-
-## LOT HANDLING RULES (CRITICAL)
-
-- Do NOT merge lots
-- Each lot must be extracted independently  
-- Items belong ONLY to their declared lot
-- If lot boundaries are unclear, do NOT guess assignment
-- Empty lots array is valid if no lots are explicitly defined
-
-## ITEM EXTRACTION RULES
-
-For each item within a lot:
-- Extract EXACT item name as written
-- Extract quantity WITH unit (e.g., "50 unités", "100 mètres")
-- Extract FULL technical description VERBATIM - do NOT summarize
-- If technical specs span multiple paragraphs, include ALL text
-
-## OUTPUT SCHEMA (JSON)
-
-```json
-{
-  "reference_tender": "<exact string or null>",
-  "tender_type": "<AOON or AOOI or null>",
-  "issuing_institution": "<full legal name or null>",
-  "institution_address": "<complete address or null>",
-  "submission_deadline": {
-    "date": "<DD/MM/YYYY or null>",
-    "time": "<HH:MM or null>",
-    "source_document": "<AVIS|RC|CPS|ANNEXE>",
-    "source_override": "<true if overridden by annex>"
-  },
-  "folder_opening_location": "<physical or virtual location or null>",
-  "subject": "<complete subject text or null>",
-  "total_estimated_value": {
-    "value": "<amount or null>",
-    "currency": "<MAD or other or null>"
-  },
-  "lots": [
-    {
-      "lot_number": "<string or null>",
-      "lot_subject": "<complete lot subject or null>",
-      "lot_estimated_value": {
-        "value": "<amount or null>",
-        "currency": "<MAD or null>"
-      },
-      "caution_provisoire": {
-        "value": "<amount or null>",
-        "currency": "<MAD or null>"
-      },
-      "caution_definitive_percentage": "<percentage as string or null>",
-      "estimated_caution_definitive_value": "<computed value or null>",
-      "execution_delay": {
-        "value": "<number or null>",
-        "unit": "<jours|mois or null>"
-      },
-      "items": [
-        {
-          "item_number": "<number or designation or null>",
-          "item_name": "<exact name as written>",
-          "quantity": {
-            "value": "<number or null>",
-            "unit": "<unit string or null>"
-          },
-          "technical_description_full": "<VERBATIM complete technical specifications>"
-        }
-      ]
-    }
-  ],
-  "additional_conditions": {
-    "qualification_criteria": "<text or null>",
-    "required_documents": ["<list of required documents>"],
-    "warranty_period": "<duration or null>",
-    "payment_terms": "<terms or null>"
-  }
-}
-```
-
-## COMPUTATION RULES (STRICT)
-
-Compute `estimated_caution_definitive_value` ONLY IF:
-- `lot_estimated_value` exists AND is numeric
-- `caution_definitive_percentage` exists AND is numeric
-
-Formula: lot_estimated_value × (percentage / 100)
-
-If EITHER value is missing → null
-No rounding assumptions. No default percentages.
-
-## LANGUAGE RULES
-
-- Preserve original language (French/Arabic)
-- Do NOT translate any text
-- Do NOT summarize technical descriptions
-- Technical descriptions must be VERBATIM copy
-
-Return ONLY the JSON object, no explanations or markdown formatting outside the JSON.
-
-"""
-
-# System prompt for Ask AI (Phase 3) - loaded from external file to avoid encoding issues
-ASK_AI_PROMPT = None  # Lazy-loaded
+def get_universal_extraction_prompt() -> str:
+    """Get the UNIVERSAL_EXTRACTION_PROMPT, loading from file if needed"""
+    global UNIVERSAL_EXTRACTION_PROMPT
+    if UNIVERSAL_EXTRACTION_PROMPT is None:
+        UNIVERSAL_EXTRACTION_PROMPT = _load_prompt("universal_extraction_prompt.txt")
+    return UNIVERSAL_EXTRACTION_PROMPT
 
 
 def get_ask_ai_prompt() -> str:
@@ -352,8 +123,8 @@ class AIService:
         logger.info("Starting Avis metadata extraction...")
         
         response = self._call_ai(
-            AVIS_EXTRACTION_PROMPT,
-            f"Extract metadata from this Avis document:\n\n{avis_text[:15000]}"  # Limit context
+            get_avis_extraction_prompt(),
+            f"Extrait les métadonnées de ce document Avis:\n\n{avis_text[:15000]}"  # Limit context
         )
         
         if not response:
@@ -424,8 +195,8 @@ class AIService:
         logger.info("Starting universal metadata extraction...")
         
         response = self._call_ai(
-            UNIVERSAL_EXTRACTION_PROMPT,
-            f"Extract universal metadata from these tender documents:\n\n{full_context[:30000]}"
+            get_universal_extraction_prompt(),
+            f"Extrait les métadonnées universelles de ces documents d'appel d'offres:\n\n{full_context[:30000]}"
         )
         
         if not response:
