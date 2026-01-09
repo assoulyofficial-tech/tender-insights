@@ -93,6 +93,22 @@ Le type d'appel d'offres peut inclure plusieurs formes, notamment:
 
 Extrait le type EXACTEMENT tel qu'il apparaît dans le document. Ne normalise PAS.
 
+## RÈGLES DE GESTION DES LOTS (CRITIQUE)
+
+1. **Lot unique = Lot #1**: Si un seul lot est détecté, son numéro est TOUJOURS "1" (jamais null)
+
+2. **Lot unique hérite de l'estimation**: Si un seul lot existe, `lot_estimated_value` = `total_estimated_value` du marché
+
+3. **Lot unique hérite de la caution provisoire**: Si un seul lot existe, sa `caution_provisoire` = la caution provisoire mentionnée dans l'avis
+
+4. **Détection implicite de lot unique**: Si l'avis ne mentionne PAS explicitement de lots MAIS contient UNE SEULE `caution provisoire`:
+   - Il y a UN lot (lot_number: "1")
+   - lot_subject = subject du marché
+   - lot_estimated_value = total_estimated_value du marché
+   - caution_provisoire = la valeur mentionnée
+
+5. **Cohérence lots/cautions**: Le nombre de `caution provisoire` mentionnées DOIT correspondre au nombre de lots. Utilise cela pour valider/déduire le nombre de lots.
+
 ## RÈGLES DE GÉNÉRATION DES MOTS-CLÉS
 
 Génère exactement 10 mots-clés par langue basés sur:
@@ -107,7 +123,6 @@ Les mots-clés alimentent le moteur de recherche. N'invente pas de concepts abse
 1. Préserve exactement la formulation originale
 2. Ne nettoie ni ne normalise les numéros de référence
 3. Si l'information sur les lots est partielle, extrait ce qui existe
-4. Si aucun lot n'est explicitement numéroté, retourne un tableau vide
-5. tender_type doit être exactement comme indiqué dans le document, ou null si non spécifié
+4. tender_type doit être exactement comme indiqué dans le document, ou null si non spécifié
 
 Retourne UNIQUEMENT l'objet JSON, sans explications.
