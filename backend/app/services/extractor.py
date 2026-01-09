@@ -337,43 +337,42 @@ def _is_pdf_scanned(file_bytes: io.BytesIO) -> Tuple[bool, str]:
 
 
 def _ocr_first_page_pdf(file_bytes: io.BytesIO) -> str:
-    """OCR only the first page of a scanned PDF using Tesseract OCR.
+    """OCR only the first page of a scanned PDF using external PaddleOCR service.
     
-    Uses pdf2image (Poppler) to convert PDF page to image, then pytesseract for OCR.
+    Calls the PaddleOCR REST API running on localhost:8765.
     """
+    import requests
+    
+    PADDLEOCR_SERVICE_URL = "http://localhost:8765"
+    
     try:
-        import pytesseract
-        from pdf2image import convert_from_bytes
-        
-        # Configure Tesseract path for Windows
-        import os
-        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if os.path.exists(tesseract_path):
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        
         file_bytes.seek(0)
         pdf_bytes = file_bytes.read()
         
-        # Convert only first page to image (300 DPI for good OCR quality)
-        images = convert_from_bytes(
-            pdf_bytes,
-            first_page=1,
-            last_page=1,
-            dpi=300,
-            poppler_path=r"C:\poppler-24.08.0\Library\bin"
+        # Call external PaddleOCR service
+        response = requests.post(
+            f"{PADDLEOCR_SERVICE_URL}/ocr/pdf/first-page",
+            files={"file": ("document.pdf", pdf_bytes, "application/pdf")},
+            timeout=120
         )
         
-        if not images:
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success"):
+                return result.get("text", "").strip()
+            else:
+                logger.error(f"PaddleOCR service error: {result.get('error')}")
+                return ""
+        else:
+            logger.error(f"PaddleOCR service returned {response.status_code}")
             return ""
         
-        # OCR the first page image
-        text = pytesseract.image_to_string(images[0], lang='fra+ara+eng')
-        
-        return text.strip()
-        
-    except ImportError as e:
-        logger.warning(f"OCR dependencies not available: {e}")
-        return "[OCR REQUIRED]"
+    except requests.exceptions.ConnectionError:
+        logger.error("PaddleOCR service not running. Start it with: cd paddleocr_service && python server.py")
+        return "[OCR SERVICE NOT AVAILABLE]"
+    except requests.exceptions.Timeout:
+        logger.error("PaddleOCR service timeout")
+        return "[OCR TIMEOUT]"
     except Exception as e:
         logger.error(f"First-page OCR failed: {e}")
         return ""
@@ -681,56 +680,50 @@ def _extract_full_pdf_digital(file_bytes: io.BytesIO) -> Tuple[str, int]:
 
 
 def _extract_full_pdf_ocr(file_bytes: io.BytesIO) -> Tuple[str, int]:
-    """Full OCR extraction from scanned PDF using Tesseract OCR.
+    """Full OCR extraction from scanned PDF using external PaddleOCR service.
     
-    Uses pdf2image (Poppler) to convert PDF pages to images, then pytesseract for OCR.
+    Calls the PaddleOCR REST API running on localhost:8765.
     """
+    import requests
+    
+    PADDLEOCR_SERVICE_URL = "http://localhost:8765"
+    
     try:
-        import pytesseract
-        from pdf2image import convert_from_bytes
-        import os
-        
-        # Configure Tesseract path for Windows
-        tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if os.path.exists(tesseract_path):
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        
-        logger.info("Full OCR extraction starting (Tesseract)...")
+        logger.info("Full OCR extraction starting (PaddleOCR service)...")
         
         file_bytes.seek(0)
         pdf_bytes = file_bytes.read()
         
-        # Convert all pages to images (300 DPI for good OCR quality)
-        images = convert_from_bytes(
-            pdf_bytes,
-            dpi=300,
-            poppler_path=r"C:\poppler-24.08.0\Library\bin"
+        # Call external PaddleOCR service
+        response = requests.post(
+            f"{PADDLEOCR_SERVICE_URL}/ocr/pdf",
+            files={"file": ("document.pdf", pdf_bytes, "application/pdf")},
+            timeout=300  # 5 min timeout for large PDFs
         )
         
-        page_count = len(images)
-        all_text: List[str] = []
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success"):
+                text = result.get("text", "")
+                pages = result.get("pages", 0)
+                logger.info(f"OCR completed: {pages} pages in {result.get('processing_time', 0)}s")
+                return text.strip(), pages
+            else:
+                logger.error(f"PaddleOCR service error: {result.get('error')}")
+                return f"[OCR FAILED: {result.get('error')}]", 0
+        else:
+            logger.error(f"PaddleOCR service returned {response.status_code}")
+            return f"[OCR FAILED: HTTP {response.status_code}]", 0
         
-        for page_num, image in enumerate(images):
-            # OCR each page (French + Arabic + English)
-            page_text = pytesseract.image_to_string(image, lang='fra+ara+eng')
-            
-            if page_text.strip():
-                all_text.append(f"--- Page {page_num + 1} ---\n{page_text.strip()}")
-        
-        return "\n\n".join(all_text), page_count
-
-    except ImportError as e:
-        logger.warning(f"OCR dependencies not available: {e}")
-        return "[OCR REQUIRED - Dependencies not installed]", 0
+    except requests.exceptions.ConnectionError:
+        logger.error("PaddleOCR service not running. Start it with: cd paddleocr_service && python server.py")
+        return "[OCR SERVICE NOT AVAILABLE - Start paddleocr_service/server.py]", 0
+    except requests.exceptions.Timeout:
+        logger.error("PaddleOCR service timeout on full PDF")
+        return "[OCR TIMEOUT]", 0
     except Exception as e:
         logger.error(f"Full OCR failed: {e}")
         return f"[OCR FAILED: {str(e)}]", 0
-    finally:
-        try:
-            if doc is not None:
-                doc.close()
-        except Exception:
-            pass
 
 
 
