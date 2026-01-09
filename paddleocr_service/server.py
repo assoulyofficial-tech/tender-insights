@@ -1,5 +1,5 @@
 """
-PaddleOCR REST API Service
+Tesseract OCR REST API Service
 Runs as a standalone service on port 8765
 """
 
@@ -11,12 +11,16 @@ import atexit
 import shutil
 from flask import Flask, request, jsonify
 from PIL import Image
+import pytesseract
 
 app = Flask(__name__)
 
-# Global OCR pipeline (lazy loaded)
-_ocr_pipeline = None
+# Global temp directory
 _temp_dir = None
+
+# Tesseract path (Windows)
+TESSERACT_PATH = os.environ.get("TESSERACT_PATH", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 # Poppler path for pdf2image (Windows)
 POPPLER_PATH = os.environ.get("POPPLER_PATH", r"C:\poppler-24.08.0\Library\bin")
@@ -24,12 +28,17 @@ POPPLER_PATH = os.environ.get("POPPLER_PATH", r"C:\poppler-24.08.0\Library\bin")
 # PDF conversion DPI - keep high for quality
 PDF_DPI = int(os.environ.get("PDF_DPI", "200"))
 
+# Tesseract config for best accuracy
+# Use French + Arabic + English
+TESSERACT_LANG = os.environ.get("TESSERACT_LANG", "fra+ara+eng")
+TESSERACT_CONFIG = "--oem 3 --psm 3"
+
 
 def get_temp_dir():
     """Get or create a dedicated temp directory for OCR."""
     global _temp_dir
     if _temp_dir is None:
-        _temp_dir = tempfile.mkdtemp(prefix="paddleocr_service_")
+        _temp_dir = tempfile.mkdtemp(prefix="tesseract_service_")
         atexit.register(cleanup_temp_dir)
     return _temp_dir
 
@@ -44,55 +53,38 @@ def cleanup_temp_dir():
             print(f"Warning: Could not clean temp dir: {e}")
 
 
-def get_ocr_pipeline():
-    """Lazy-load the PaddleOCR pipeline with optimized settings."""
-    global _ocr_pipeline
-    if _ocr_pipeline is None:
-        print("Loading PaddleOCR pipeline with optimizations...")
-        try:
-            from paddlex import create_pipeline
-            # Use optimized pipeline config for speed
-            # - Increase CPU threads for parallel processing
-            # - Use efficient batch processing
-            import paddle
-            paddle.set_device('cpu')
-            # Set CPU threads for faster inference
-            cpu_threads = os.cpu_count() or 4
-            print(f"[OCR] Using {cpu_threads} CPU threads")
-            
-            _ocr_pipeline = create_pipeline(pipeline="OCR")
-            print("PaddleOCR pipeline loaded successfully!")
-        except Exception as e:
-            print(f"Failed to load PaddleOCR: {e}")
-            raise
-    return _ocr_pipeline
-
-
-def extract_text_from_result(result) -> str:
-    """Extract text from PaddleOCR result."""
-    texts = []
+def ocr_image_tesseract(image: Image.Image) -> str:
+    """Run Tesseract OCR on an image."""
     try:
-        for item in result:
-            if hasattr(item, 'rec_texts') and item.rec_texts:
-                texts.extend(item.rec_texts)
-            elif isinstance(item, dict) and 'rec_texts' in item:
-                texts.extend(item['rec_texts'])
+        text = pytesseract.image_to_string(
+            image, 
+            lang=TESSERACT_LANG,
+            config=TESSERACT_CONFIG
+        )
+        return text.strip()
     except Exception as e:
-        print(f"Error extracting text: {e}")
-    return "\n".join(texts)
-
-
-# No resizing - keep full quality for accurate OCR
+        print(f"[OCR ERROR] Tesseract failed: {e}")
+        raise
 
 
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
-    return jsonify({
-        "status": "ok",
-        "service": "paddleocr",
-        "pipeline_loaded": _ocr_pipeline is not None
-    })
+    # Test tesseract is working
+    try:
+        version = pytesseract.get_tesseract_version()
+        return jsonify({
+            "status": "ok",
+            "service": "tesseract",
+            "version": str(version),
+            "languages": TESSERACT_LANG
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "service": "tesseract",
+            "error": str(e)
+        }), 500
 
 
 @app.route('/ocr', methods=['POST'])
@@ -114,32 +106,17 @@ def ocr_image():
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         print(f"[OCR] Image size: {image.size}")
         
-        # Save to temp file (PaddleOCR requires file path)
-        temp_dir = get_temp_dir()
-        temp_path = os.path.join(temp_dir, f"ocr_{int(time.time() * 1000)}.png")
-        image.save(temp_path)
-        print(f"[OCR] Saved to temp: {temp_path}")
+        # Run OCR
+        print(f"[OCR] Running Tesseract...")
+        text = ocr_image_tesseract(image)
+        print(f"[OCR] Extracted {len(text)} chars")
         
-        try:
-            # Run OCR
-            pipeline = get_ocr_pipeline()
-            print(f"[OCR] Running OCR...")
-            result = list(pipeline.predict(temp_path))
-            text = extract_text_from_result(result)
-            print(f"[OCR] Extracted {len(text)} chars")
-            
-            return jsonify({
-                "success": True,
-                "text": text,
-                "pages": 1,
-                "processing_time": round(time.time() - start_time, 2)
-            })
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
+        return jsonify({
+            "success": True,
+            "text": text,
+            "pages": 1,
+            "processing_time": round(time.time() - start_time, 2)
+        })
                 
     except Exception as e:
         import traceback
@@ -170,31 +147,18 @@ def ocr_pdf():
         pdf_bytes = file.read()
         print(f"[PDF OCR] Received PDF: {len(pdf_bytes)} bytes")
         
-        # Convert all pages to images (reduced DPI for speed)
+        # Convert all pages to images
         print(f"[PDF OCR] Converting PDF to images (DPI={PDF_DPI}, poppler: {POPPLER_PATH})...")
         images = convert_from_bytes(pdf_bytes, dpi=PDF_DPI, poppler_path=POPPLER_PATH)
         print(f"[PDF OCR] Converted {len(images)} pages")
         
         all_text = []
-        temp_dir = get_temp_dir()
-        pipeline = get_ocr_pipeline()
         
         for i, image in enumerate(images):
             print(f"[PDF OCR] Processing page {i + 1}/{len(images)}, size: {image.size}...")
-            
-            temp_path = os.path.join(temp_dir, f"pdf_page_{i}_{int(time.time() * 1000)}.png")
-            image.save(temp_path)
-            
-            try:
-                result = list(pipeline.predict(temp_path))
-                page_text = extract_text_from_result(result)
-                all_text.append(f"--- Page {i + 1} ---\n{page_text}")
-                print(f"[PDF OCR] Page {i + 1}: {len(page_text)} chars")
-            finally:
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
+            page_text = ocr_image_tesseract(image)
+            all_text.append(f"--- Page {i + 1} ---\n{page_text}")
+            print(f"[PDF OCR] Page {i + 1}: {len(page_text)} chars")
         
         return jsonify({
             "success": True,
@@ -232,7 +196,7 @@ def ocr_pdf_first_page():
         pdf_bytes = file.read()
         print(f"[PDF FIRST] Received PDF: {len(pdf_bytes)} bytes")
         
-        # Convert first page only (reduced DPI for speed)
+        # Convert first page only
         print(f"[PDF FIRST] Converting first page (DPI={PDF_DPI}, poppler: {POPPLER_PATH})...")
         images = convert_from_bytes(pdf_bytes, dpi=PDF_DPI, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
         print(f"[PDF FIRST] Got {len(images)} image(s)")
@@ -241,29 +205,18 @@ def ocr_pdf_first_page():
             return jsonify({"success": False, "error": "Could not extract first page"}), 500
         
         image = images[0]
-        temp_dir = get_temp_dir()
-        temp_path = os.path.join(temp_dir, f"pdf_first_{int(time.time() * 1000)}.png")
-        image.save(temp_path)
-        print(f"[PDF FIRST] Image size: {image.size}, saved to: {temp_path}")
+        print(f"[PDF FIRST] Image size: {image.size}")
         
-        try:
-            pipeline = get_ocr_pipeline()
-            print(f"[PDF FIRST] Running OCR...")
-            result = list(pipeline.predict(temp_path))
-            text = extract_text_from_result(result)
-            print(f"[PDF FIRST] Extracted {len(text)} chars")
-            
-            return jsonify({
-                "success": True,
-                "text": text,
-                "pages": 1,
-                "processing_time": round(time.time() - start_time, 2)
-            })
-        finally:
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
+        print(f"[PDF FIRST] Running Tesseract OCR...")
+        text = ocr_image_tesseract(image)
+        print(f"[PDF FIRST] Extracted {len(text)} chars")
+        
+        return jsonify({
+            "success": True,
+            "text": text,
+            "pages": 1,
+            "processing_time": round(time.time() - start_time, 2)
+        })
         
     except Exception as e:
         import traceback
@@ -277,8 +230,11 @@ def ocr_pdf_first_page():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("PaddleOCR Service")
+    print("Tesseract OCR Service")
     print("=" * 50)
+    print(f"Tesseract path: {TESSERACT_PATH}")
+    print(f"Poppler path: {POPPLER_PATH}")
+    print(f"Languages: {TESSERACT_LANG}")
     print("Starting on http://localhost:8765")
     print("Endpoints:")
     print("  GET  /health           - Health check")
@@ -287,10 +243,11 @@ if __name__ == '__main__':
     print("  POST /ocr/pdf/first-page - OCR first page of PDF")
     print("=" * 50)
     
-    # Pre-load the pipeline on startup
+    # Test tesseract on startup
     try:
-        get_ocr_pipeline()
+        version = pytesseract.get_tesseract_version()
+        print(f"Tesseract version: {version}")
     except Exception as e:
-        print(f"Warning: Could not pre-load pipeline: {e}")
+        print(f"Warning: Could not verify Tesseract: {e}")
     
     app.run(host='0.0.0.0', port=8765, debug=False, threaded=True)
