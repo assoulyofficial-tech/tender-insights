@@ -16,7 +16,7 @@ from uuid import UUID
 
 from app.core.database import get_db
 from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType
-from app.services.scraper import TenderScraper, ScraperProgress
+from app.services.scraper import TenderScraper, ScraperProgress, WebsiteMetadata
 from app.services.extractor import process_tender_zip, ExtractionResult, ExtractionMethod, FirstPageResult
 from app.services.ai_pipeline import ai_service
 
@@ -184,9 +184,12 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
         extracted_count = 0
         for result in results:
             if result.success and result.zip_bytes:
-                # Create tender record
+                # Get website metadata (authoritative source)
+                web_meta = result.website_metadata
+                
+                # Create tender record with website reference if available
                 tender = Tender(
-                    external_reference=f"tender_{result.index}",
+                    external_reference=web_meta.reference_tender if web_meta and web_meta.reference_tender else f"tender_{result.index}",
                     source_url=result.url,
                     status=TenderStatus.PENDING,
                     download_date=start_date or datetime.now().strftime("%Y-%m-%d")
@@ -219,11 +222,40 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                     # Run AI extraction on Avis
                     metadata = ai_service.extract_avis_metadata(avis_extraction.text)
                     if metadata:
+                        # WEBSITE METADATA OVERRIDE (Authoritative)
+                        # Reference, deadline, and subject from website take priority
+                        if web_meta:
+                            if web_meta.reference_tender:
+                                metadata["reference_tender"] = {
+                                    "value": web_meta.reference_tender,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                                tender.external_reference = web_meta.reference_tender
+                            
+                            if web_meta.submission_deadline_date or web_meta.submission_deadline_time:
+                                metadata["submission_deadline"] = {
+                                    "date": {
+                                        "value": web_meta.submission_deadline_date,
+                                        "source_document": "WEBSITE",
+                                        "source_date": None
+                                    },
+                                    "time": {
+                                        "value": web_meta.submission_deadline_time,
+                                        "source_document": "WEBSITE",
+                                        "source_date": None
+                                    }
+                                }
+                            
+                            if web_meta.subject:
+                                metadata["subject"] = {
+                                    "value": web_meta.subject,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                        
                         tender.avis_metadata = metadata
                         tender.status = TenderStatus.LISTED
-                        # Try to extract reference from metadata
-                        if metadata.get("reference_tender", {}).get("value"):
-                            tender.external_reference = metadata["reference_tender"]["value"]
                     else:
                         tender.status = TenderStatus.ERROR
                         tender.error_message = "AI extraction failed"
