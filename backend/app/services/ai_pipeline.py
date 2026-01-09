@@ -167,8 +167,8 @@ You MUST NOT:
 - Simplify technical specifications
 - Translate text
 
-If something is missing → null.
-If something is unclear → null.
+Si quelque chose manque -> null.
+Si quelque chose n'est pas clair -> null.
 
 ## INPUT DOCUMENTS PRIORITY (AUTHORITATIVE ORDER)
 
