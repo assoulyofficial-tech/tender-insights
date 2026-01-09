@@ -21,6 +21,12 @@ _temp_dir = None
 # Poppler path for pdf2image (Windows)
 POPPLER_PATH = os.environ.get("POPPLER_PATH", r"C:\poppler-24.08.0\Library\bin")
 
+# PDF conversion DPI (lower = faster, but less accurate)
+PDF_DPI = int(os.environ.get("PDF_DPI", "150"))  # Reduced from 200
+
+# Max image dimension (resize large images for speed)
+MAX_IMAGE_DIM = int(os.environ.get("MAX_IMAGE_DIM", "1500"))
+
 
 def get_temp_dir():
     """Get or create a dedicated temp directory for OCR."""
@@ -70,6 +76,17 @@ def extract_text_from_result(result) -> str:
     return "\n".join(texts)
 
 
+def resize_image_if_needed(image: Image.Image) -> Image.Image:
+    """Resize image if too large (speeds up OCR significantly)."""
+    w, h = image.size
+    if max(w, h) > MAX_IMAGE_DIM:
+        ratio = MAX_IMAGE_DIM / max(w, h)
+        new_size = (int(w * ratio), int(h * ratio))
+        print(f"[RESIZE] {w}x{h} -> {new_size[0]}x{new_size[1]}")
+        return image.resize(new_size, Image.Resampling.LANCZOS)
+    return image
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
@@ -97,7 +114,10 @@ def ocr_image():
         image_bytes = file.read()
         print(f"[OCR] Received image: {len(image_bytes)} bytes")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        print(f"[OCR] Image size: {image.size}")
+        print(f"[OCR] Original size: {image.size}")
+        
+        # Resize if too large
+        image = resize_image_if_needed(image)
         
         # Save to temp file (PaddleOCR requires file path)
         temp_dir = get_temp_dir()
@@ -155,9 +175,9 @@ def ocr_pdf():
         pdf_bytes = file.read()
         print(f"[PDF OCR] Received PDF: {len(pdf_bytes)} bytes")
         
-        # Convert all pages to images
-        print(f"[PDF OCR] Converting PDF to images (poppler: {POPPLER_PATH})...")
-        images = convert_from_bytes(pdf_bytes, dpi=200, poppler_path=POPPLER_PATH)
+        # Convert all pages to images (reduced DPI for speed)
+        print(f"[PDF OCR] Converting PDF to images (DPI={PDF_DPI}, poppler: {POPPLER_PATH})...")
+        images = convert_from_bytes(pdf_bytes, dpi=PDF_DPI, poppler_path=POPPLER_PATH)
         print(f"[PDF OCR] Converted {len(images)} pages")
         
         all_text = []
@@ -166,6 +186,10 @@ def ocr_pdf():
         
         for i, image in enumerate(images):
             print(f"[PDF OCR] Processing page {i + 1}/{len(images)}...")
+            
+            # Resize if too large
+            image = resize_image_if_needed(image)
+            
             temp_path = os.path.join(temp_dir, f"pdf_page_{i}_{int(time.time() * 1000)}.png")
             image.save(temp_path)
             
@@ -216,18 +240,21 @@ def ocr_pdf_first_page():
         pdf_bytes = file.read()
         print(f"[PDF FIRST] Received PDF: {len(pdf_bytes)} bytes")
         
-        # Convert first page only
-        print(f"[PDF FIRST] Converting first page (poppler: {POPPLER_PATH})...")
-        images = convert_from_bytes(pdf_bytes, dpi=200, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
+        # Convert first page only (reduced DPI for speed)
+        print(f"[PDF FIRST] Converting first page (DPI={PDF_DPI}, poppler: {POPPLER_PATH})...")
+        images = convert_from_bytes(pdf_bytes, dpi=PDF_DPI, first_page=1, last_page=1, poppler_path=POPPLER_PATH)
         print(f"[PDF FIRST] Got {len(images)} image(s)")
         
         if not images:
             return jsonify({"success": False, "error": "Could not extract first page"}), 500
         
+        # Resize if too large
+        image = resize_image_if_needed(images[0])
+        
         temp_dir = get_temp_dir()
         temp_path = os.path.join(temp_dir, f"pdf_first_{int(time.time() * 1000)}.png")
-        images[0].save(temp_path)
-        print(f"[PDF FIRST] Image size: {images[0].size}, saved to: {temp_path}")
+        image.save(temp_path)
+        print(f"[PDF FIRST] Image size: {image.size}, saved to: {temp_path}")
         
         try:
             pipeline = get_ocr_pipeline()
