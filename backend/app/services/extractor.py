@@ -1261,6 +1261,83 @@ def extract_best_documents_for_phase1(
     return extractions, classifications
 
 
+def extract_best_documents_for_phase1_lazy(
+    zip_files: Dict[str, io.BytesIO],
+    tender_reference: Optional[str] = None,
+    current_metadata: Optional[Dict] = None,
+) -> Tuple[Dict[DocumentType, ExtractionResult], List["FirstPageResult"]]:
+    """LAZY EXTRACTION: Only extract/OCR documents when needed for missing fields.
+    
+    Workflow:
+    1. Classify all documents (first-page scan - fast, no full OCR)
+    2. For each document type in priority order (AVIS → RC → CPS):
+       - Check if we still have missing fields
+       - Only then do full extraction (with OCR if scanned)
+       - Stop when all fields are satisfied
+    
+    Args:
+        zip_files: Dictionary of filename -> file bytes
+        tender_reference: Optional tender reference to detect multi-tender Avis
+        current_metadata: Current metadata state (to know what's missing)
+    
+    Returns:
+        (extractions_by_type, classifications)
+    """
+    from app.services.phase1_merge import is_metadata_complete, get_missing_fields
+    
+    logger.info("Phase 1 (LAZY): Classifying all documents...")
+    classifications = classify_all_documents(zip_files)
+
+    avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
+    rc_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.RC]
+    cps_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.CPS]
+
+    best_avis = _select_best_document(avis_candidates, "Avis") if avis_candidates else None
+    if best_avis and _is_multi_tender_avis(best_avis.first_page_text, tender_reference):
+        logger.warning(f"Ignoring Avis '{best_avis.filename}' (multi-tender compilation)")
+        best_avis = None
+
+    best_rc = _select_best_document(rc_candidates, "RC") if rc_candidates else None
+    best_cps = _select_best_document(cps_candidates, "CPS") if cps_candidates else None
+
+    # Ordered by fallback priority
+    candidates = [
+        (DocumentType.AVIS, best_avis),
+        (DocumentType.RC, best_rc),
+        (DocumentType.CPS, best_cps),
+    ]
+    
+    extractions: Dict[DocumentType, ExtractionResult] = {}
+
+    for doc_type, info in candidates:
+        if not info:
+            continue
+        if info.filename not in zip_files:
+            continue
+            
+        # Check if we still need this extraction
+        if is_metadata_complete(current_metadata):
+            logger.info(f"Metadata complete, skipping {doc_type.value} extraction")
+            break
+        
+        missing = get_missing_fields(current_metadata)
+        logger.info(f"Missing fields: {missing}. Extracting {doc_type.value}...")
+
+        file_bytes = zip_files[info.filename]
+        logger.info(f"Full extraction of {doc_type.value}: {info.filename} (scanned={info.is_scanned})")
+        extracted = extract_full_document(info.filename, file_bytes, info.is_scanned)
+        
+        if extracted and extracted.success:
+            extracted.document_type = doc_type
+            extractions[doc_type] = extracted
+
+    # Discard first-page texts
+    for c in classifications:
+        c.first_page_text = ""
+
+    return extractions, classifications
+
+
 # ============================
 # LEGACY FUNCTION (for backward compatibility)
 # ============================

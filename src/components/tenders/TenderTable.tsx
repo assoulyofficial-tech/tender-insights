@@ -80,7 +80,7 @@ function AvisMetadataDetails({ metadata }: { metadata: AvisMetadata | null }) {
           source={metadata.submission_deadline?.time?.source_document}
         />
         <MetadataField 
-          label="Estimated Value" 
+          label="Estimated Value (TTC)" 
           value={metadata.total_estimated_value?.value} 
           source={metadata.total_estimated_value?.source_document}
         />

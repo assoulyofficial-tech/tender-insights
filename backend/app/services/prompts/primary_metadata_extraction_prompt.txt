@@ -29,19 +29,26 @@ Si une valeur n'est pas explicitement indiquée: retourne **null**.
 ## DÉTECTION DE DEVISE (CURRENCY)
 
 Détecte automatiquement la devise à partir du texte:
-- "MAD", "DH", "Dhs", "درهم" → currency: "MAD" (Dirham Marocain)
-- "EUR", "€" → currency: "EUR"
-- "USD", "$" → currency: "USD"
-- Si non spécifié mais montant en contexte marocain → currency: "MAD"
+- "MAD", "DH", "Dhs", "Dirhams", "درهم" → currency: "MAD" (Dirham Marocain)
+- "EUR", "€", "Euros" → currency: "EUR"
+- "USD", "$", "Dollars" → currency: "USD"
+
+IMPORTANT: C'est à toi de détecter la devise. Analyse le contexte du montant (suffixe, mention dans le texte, symbole). Si aucune devise n'est explicitement indiquée mais le contexte est marocain → currency: "MAD".
 
 ## CALCUL TOTAL_ESTIMATED_VALUE (RÈGLE CRITIQUE)
+
+**RÈGLE ABSOLUE**: Le `total_estimated_value` d'un marché = la SOMME des valeurs estimées de TOUS ses lots.
 
 SI plusieurs lots sont présents avec des valeurs estimées individuelles:
 - `total_estimated_value.value` = SOMME de toutes les `lot_estimated_value`
 - Calcule et retourne le total numérique (ex: "1 500 000,00" si lot1=500000 + lot2=1000000)
+- NE PAS copier une valeur globale si elle diffère de la somme des lots
 
-SI un seul lot OU estimation globale déjà fournie:
-- Utilise la valeur telle quelle
+SI un seul lot:
+- `total_estimated_value.value` = `lot_estimated_value` du lot unique
+
+SI aucun lot mais estimation globale fournie:
+- Utilise la valeur globale telle quelle
 
 ## SCHÉMA DE SORTIE (JSON)
 
