@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { ArrowLeft, ExternalLink, Bot, FileText, RefreshCw, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
@@ -7,7 +7,12 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { api } from '@/lib/api';
-import type { Tender, TenderLot, TenderItem, UniversalMetadata, AvisMetadata } from '@/types/tender';
+import type { Tender, TenderLot, TenderItem, UniversalMetadata, AvisMetadata, LotDeepData } from '@/types/tender';
+
+// Merged lot with both avis and deep data
+interface MergedLot extends TenderLot {
+  deep?: LotDeepData;
+}
 
 function MetadataField({ label, value, source }: { label: string; value: string | null | undefined; source?: string | null }) {
   return (
@@ -25,7 +30,9 @@ function MetadataField({ label, value, source }: { label: string; value: string 
   );
 }
 
-function LotCard({ lot, index, showDeepFields }: { lot: TenderLot; index: number; showDeepFields: boolean }) {
+function LotCard({ lot, index, showDeepFields }: { lot: MergedLot; index: number; showDeepFields: boolean }) {
+  const deep = lot.deep;
+  
   return (
     <div className="data-card space-y-4">
       <div className="flex items-start justify-between">
@@ -41,28 +48,36 @@ function LotCard({ lot, index, showDeepFields }: { lot: TenderLot; index: number
         </div>
       </div>
       
-      {showDeepFields && (
+      {showDeepFields && deep && (
         <div className="border-t border-border pt-4 space-y-3">
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
               <span className="text-muted-foreground">Caution Définitive %:</span>
-              <span className="ml-2 font-medium">{lot.caution_definitive_percentage || '-'}</span>
+              <span className="ml-2 font-medium">{deep.caution_definitive_percentage?.value || '-'}</span>
             </div>
             <div>
               <span className="text-muted-foreground">Caution Définitive Estimée:</span>
-              <span className="ml-2 font-medium">{lot.estimated_caution_definitive_value || '-'}</span>
+              <span className="ml-2 font-medium">
+                {deep.estimated_caution_definitive_value?.value 
+                  ? `${deep.estimated_caution_definitive_value.value} ${deep.estimated_caution_definitive_value.currency || ''}`
+                  : '-'}
+              </span>
             </div>
             <div>
               <span className="text-muted-foreground">Délai d'exécution:</span>
-              <span className="ml-2 font-medium">{lot.execution_date || '-'}</span>
+              <span className="ml-2 font-medium">
+                {deep.execution_delay?.value 
+                  ? `${deep.execution_delay.value} ${deep.execution_delay.unit || ''}`
+                  : '-'}
+              </span>
             </div>
           </div>
           
-          {lot.items && lot.items.length > 0 && (
+          {deep.items && deep.items.length > 0 && (
             <div className="mt-4">
-              <div className="text-sm font-medium mb-2">Items ({lot.items.length})</div>
+              <div className="text-sm font-medium mb-2">Items ({deep.items.length})</div>
               <div className="space-y-2">
-                {lot.items.map((item, itemIndex) => (
+                {deep.items.map((item, itemIndex) => (
                   <ItemCard key={itemIndex} item={item} index={itemIndex} />
                 ))}
               </div>
@@ -105,7 +120,7 @@ function LoadingOverlay({ progress, message }: { progress: number; message: stri
         <Progress value={progress} className="h-2" />
         <p className="text-sm text-muted-foreground">{message}</p>
         <p className="text-xs text-muted-foreground">
-          Extracting data from all documents (Avis, RC, CPS, Annexes)...
+          Extracting complementary data from RC, CPS, Annexes...
         </p>
       </div>
     </div>
@@ -198,10 +213,27 @@ export default function TenderDetail() {
     if (id) triggerAnalysis(id);
   };
 
-  // Get the best available metadata (universal or avis)
-  const metadata: UniversalMetadata | AvisMetadata | null = tender?.universal_metadata || tender?.avis_metadata || null;
-  const hasUniversalData = !!tender?.universal_metadata;
-  const lots = metadata?.lots || [];
+  // Always use avis_metadata as the primary source
+  const avisMetadata: AvisMetadata | null = tender?.avis_metadata || null;
+  const universalMetadata: UniversalMetadata | null = tender?.universal_metadata || null;
+  const hasDeepData = !!universalMetadata;
+  
+  // Merge lots: base from avis, deep data from universal
+  const mergedLots: MergedLot[] = useMemo(() => {
+    const avisLots = avisMetadata?.lots || [];
+    const deepDataMap = new Map<string, LotDeepData>();
+    
+    if (universalMetadata?.lots_deep_data) {
+      for (const deepLot of universalMetadata.lots_deep_data) {
+        deepDataMap.set(deepLot.lot_number, deepLot);
+      }
+    }
+    
+    return avisLots.map(lot => ({
+      ...lot,
+      deep: lot.lot_number ? deepDataMap.get(lot.lot_number) : undefined
+    }));
+  }, [avisMetadata, universalMetadata]);
 
   if (loading) {
     return (
@@ -258,7 +290,7 @@ export default function TenderDetail() {
                 {tender.external_reference}
               </h1>
               <StatusBadge status={tender.status} />
-              {hasUniversalData && (
+              {hasDeepData && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-success/10 text-success rounded text-xs">
                   <CheckCircle2 className="w-3 h-3" />
                   Deep Analyzed
@@ -266,7 +298,7 @@ export default function TenderDetail() {
               )}
             </div>
             <p className="text-muted-foreground max-w-2xl">
-              {metadata?.subject?.value}
+              {avisMetadata?.subject?.value}
             </p>
           </div>
           <div className="flex gap-2">
@@ -276,7 +308,7 @@ export default function TenderDetail() {
                 Original
               </a>
             </Button>
-            {!hasUniversalData && (
+            {!hasDeepData && (
               <Button size="sm" onClick={handleManualAnalyze} disabled={analyzing}>
                 <RefreshCw className={`w-4 h-4 mr-2 ${analyzing ? 'animate-spin' : ''}`} />
                 Deep Analyze
@@ -289,7 +321,7 @@ export default function TenderDetail() {
         <Tabs defaultValue="metadata" className="space-y-4">
           <TabsList>
             <TabsTrigger value="metadata">Metadata</TabsTrigger>
-            <TabsTrigger value="lots">Lots ({lots.length})</TabsTrigger>
+            <TabsTrigger value="lots">Lots ({mergedLots.length})</TabsTrigger>
             <TabsTrigger value="documents">Documents</TabsTrigger>
             <TabsTrigger value="ask">Ask AI</TabsTrigger>
             <TabsTrigger value="raw">Raw JSON</TabsTrigger>
@@ -299,112 +331,148 @@ export default function TenderDetail() {
             {/* Data source indicator */}
             <div className="flex items-center gap-2 text-sm">
               <span className="text-muted-foreground">Data source:</span>
-              <span className={`px-2 py-0.5 rounded text-xs ${hasUniversalData ? 'bg-success/10 text-success' : 'bg-muted'}`}>
-                {hasUniversalData ? 'Universal Metadata (Deep Analysis)' : 'Avis Metadata (Phase 1)'}
+              <span className="px-2 py-0.5 rounded text-xs bg-muted">
+                Avis Metadata (Phase 1)
               </span>
+              {hasDeepData && (
+                <span className="px-2 py-0.5 rounded text-xs bg-success/10 text-success">
+                  + Deep Analysis (Phase 2)
+                </span>
+              )}
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">
-              {/* Left column - Basic Info */}
+              {/* Left column - Basic Info (from Avis) */}
               <div className="data-card">
                 <h3 className="font-medium mb-4">Basic Information</h3>
                 <MetadataField 
                   label="Reference" 
-                  value={metadata?.reference_tender?.value} 
-                  source={metadata?.reference_tender?.source_document}
+                  value={avisMetadata?.reference_tender?.value} 
+                  source={avisMetadata?.reference_tender?.source_document}
                 />
                 <MetadataField 
                   label="Type" 
-                  value={metadata?.tender_type?.value} 
-                  source={metadata?.tender_type?.source_document}
+                  value={avisMetadata?.tender_type?.value} 
+                  source={avisMetadata?.tender_type?.source_document}
                 />
                 <MetadataField 
                   label="Issuing Institution" 
-                  value={metadata?.issuing_institution?.value} 
-                  source={metadata?.issuing_institution?.source_document}
+                  value={avisMetadata?.issuing_institution?.value} 
+                  source={avisMetadata?.issuing_institution?.source_document}
                 />
-                {hasUniversalData && (tender.universal_metadata as UniversalMetadata)?.institution_address && (
+                {hasDeepData && universalMetadata?.institution_address && (
                   <MetadataField 
                     label="Institution Address" 
-                    value={(tender.universal_metadata as UniversalMetadata).institution_address?.value} 
-                    source={(tender.universal_metadata as UniversalMetadata).institution_address?.source_document}
+                    value={universalMetadata.institution_address?.value} 
+                    source={universalMetadata.institution_address?.source_document}
                   />
                 )}
                 <MetadataField 
                   label="Opening Location" 
-                  value={metadata?.folder_opening_location?.value} 
-                  source={metadata?.folder_opening_location?.source_document}
+                  value={avisMetadata?.folder_opening_location?.value} 
+                  source={avisMetadata?.folder_opening_location?.source_document}
                 />
               </div>
 
-              {/* Right column - Submission Details */}
+              {/* Right column - Submission Details (from Avis) */}
               <div className="data-card">
                 <h3 className="font-medium mb-4">Submission Details</h3>
                 <MetadataField 
                   label="Deadline Date" 
-                  value={metadata?.submission_deadline?.date?.value} 
-                  source={metadata?.submission_deadline?.date?.source_document}
+                  value={avisMetadata?.submission_deadline?.date?.value} 
+                  source={avisMetadata?.submission_deadline?.date?.source_document}
                 />
                 <MetadataField 
                   label="Deadline Time" 
-                  value={metadata?.submission_deadline?.time?.value} 
-                  source={metadata?.submission_deadline?.time?.source_document}
+                  value={avisMetadata?.submission_deadline?.time?.value} 
+                  source={avisMetadata?.submission_deadline?.time?.source_document}
                 />
                 <MetadataField 
                   label="Estimated Value" 
-                  value={metadata?.total_estimated_value?.value} 
-                  source={metadata?.total_estimated_value?.source_document}
+                  value={avisMetadata?.total_estimated_value?.value} 
+                  source={avisMetadata?.total_estimated_value?.source_document}
                 />
-                {metadata?.total_estimated_value?.currency && (
+                {avisMetadata?.total_estimated_value?.currency && (
                   <MetadataField 
                     label="Currency" 
-                    value={metadata.total_estimated_value.currency} 
+                    value={avisMetadata.total_estimated_value.currency} 
                   />
                 )}
               </div>
             </div>
 
-            {/* Subject */}
+            {/* Subject (from Avis) */}
             <div className="data-card">
               <h3 className="font-medium mb-4">Subject</h3>
-              <p className="text-sm whitespace-pre-wrap">{metadata?.subject?.value || 'Not extracted'}</p>
-              {metadata?.subject?.source_document && (
+              <p className="text-sm whitespace-pre-wrap">{avisMetadata?.subject?.value || 'Not extracted'}</p>
+              {avisMetadata?.subject?.source_document && (
                 <div className="text-xs text-muted-foreground mt-2">
-                  Source: <span className="font-mono">{metadata.subject.source_document}</span>
+                  Source: <span className="font-mono">{avisMetadata.subject.source_document}</span>
                 </div>
               )}
             </div>
 
-            {/* Keywords */}
-            {metadata?.keywords && (
+            {/* Additional Conditions (from Deep Analysis) */}
+            {hasDeepData && universalMetadata?.additional_conditions && (
+              <div className="data-card">
+                <h3 className="font-medium mb-4">Additional Conditions (Deep Analysis)</h3>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <MetadataField 
+                    label="Qualification Criteria" 
+                    value={universalMetadata.additional_conditions.qualification_criteria} 
+                  />
+                  <MetadataField 
+                    label="Warranty Period" 
+                    value={universalMetadata.additional_conditions.warranty_period} 
+                  />
+                  <MetadataField 
+                    label="Payment Terms" 
+                    value={universalMetadata.additional_conditions.payment_terms} 
+                  />
+                  {universalMetadata.additional_conditions.required_documents?.length > 0 && (
+                    <div className="py-3 border-b border-border last:border-0">
+                      <div className="text-xs text-muted-foreground mb-1">Required Documents</div>
+                      <ul className="list-disc list-inside text-sm">
+                        {universalMetadata.additional_conditions.required_documents.map((doc, i) => (
+                          <li key={i}>{doc}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Keywords (from Avis) */}
+            {avisMetadata?.keywords && (
               <div className="data-card">
                 <h3 className="font-medium mb-4">Keywords</h3>
                 <div className="space-y-3">
-                  {metadata.keywords.keywords_fr?.length > 0 && (
+                  {avisMetadata.keywords.keywords_fr?.length > 0 && (
                     <div>
                       <span className="text-xs text-muted-foreground">French:</span>
                       <div className="flex flex-wrap gap-2 mt-1">
-                        {metadata.keywords.keywords_fr.map((kw, i) => (
+                        {avisMetadata.keywords.keywords_fr.map((kw, i) => (
                           <span key={i} className="px-2 py-0.5 bg-muted rounded text-sm">{kw}</span>
                         ))}
                       </div>
                     </div>
                   )}
-                  {metadata.keywords.keywords_eng?.length > 0 && (
+                  {avisMetadata.keywords.keywords_eng?.length > 0 && (
                     <div>
                       <span className="text-xs text-muted-foreground">English:</span>
                       <div className="flex flex-wrap gap-2 mt-1">
-                        {metadata.keywords.keywords_eng.map((kw, i) => (
+                        {avisMetadata.keywords.keywords_eng.map((kw, i) => (
                           <span key={i} className="px-2 py-0.5 bg-muted rounded text-sm">{kw}</span>
                         ))}
                       </div>
                     </div>
                   )}
-                  {metadata.keywords.keywords_ar?.length > 0 && (
+                  {avisMetadata.keywords.keywords_ar?.length > 0 && (
                     <div>
                       <span className="text-xs text-muted-foreground">Arabic:</span>
                       <div className="flex flex-wrap gap-2 mt-1" dir="rtl">
-                        {metadata.keywords.keywords_ar.map((kw, i) => (
+                        {avisMetadata.keywords.keywords_ar.map((kw, i) => (
                           <span key={i} className="px-2 py-0.5 bg-muted rounded text-sm">{kw}</span>
                         ))}
                       </div>
@@ -419,21 +487,21 @@ export default function TenderDetail() {
             {/* Lots summary */}
             <div className="flex items-center justify-between">
               <div className="text-sm text-muted-foreground">
-                {lots.length} lot{lots.length !== 1 ? 's' : ''} extracted
+                {mergedLots.length} lot{mergedLots.length !== 1 ? 's' : ''} extracted
               </div>
-              {hasUniversalData && (
+              {hasDeepData && (
                 <span className="text-xs text-success">Deep analysis data available</span>
               )}
             </div>
 
-            {lots.length > 0 ? (
+            {mergedLots.length > 0 ? (
               <div className="space-y-3">
-                {lots.map((lot, index) => (
+                {mergedLots.map((lot, index) => (
                   <LotCard 
                     key={index} 
                     lot={lot} 
                     index={index} 
-                    showDeepFields={hasUniversalData} 
+                    showDeepFields={hasDeepData} 
                   />
                 ))}
               </div>
@@ -491,30 +559,30 @@ export default function TenderDetail() {
           <TabsContent value="raw" className="space-y-4">
             {/* Show both metadata sources */}
             <div className="space-y-4">
-              {tender.universal_metadata && (
-                <div className="terminal">
-                  <div className="terminal-header">
-                    <div className="terminal-dot bg-success" />
-                    <div className="terminal-dot bg-warning" />
-                    <div className="terminal-dot bg-destructive" />
-                    <span className="ml-2 text-xs text-muted-foreground">universal_metadata.json (Deep Analysis)</span>
-                  </div>
-                  <pre className="p-4 text-xs overflow-auto max-h-[400px]">
-                    {JSON.stringify(tender.universal_metadata, null, 2)}
-                  </pre>
-                </div>
-              )}
-              
               {tender.avis_metadata && (
                 <div className="terminal">
                   <div className="terminal-header">
                     <div className="terminal-dot bg-primary" />
                     <div className="terminal-dot bg-warning" />
                     <div className="terminal-dot bg-destructive" />
-                    <span className="ml-2 text-xs text-muted-foreground">avis_metadata.json (Phase 1)</span>
+                    <span className="ml-2 text-xs text-muted-foreground">avis_metadata.json (Phase 1 - Base Data)</span>
                   </div>
                   <pre className="p-4 text-xs overflow-auto max-h-[400px]">
                     {JSON.stringify(tender.avis_metadata, null, 2)}
+                  </pre>
+                </div>
+              )}
+              
+              {tender.universal_metadata && (
+                <div className="terminal">
+                  <div className="terminal-header">
+                    <div className="terminal-dot bg-success" />
+                    <div className="terminal-dot bg-warning" />
+                    <div className="terminal-dot bg-destructive" />
+                    <span className="ml-2 text-xs text-muted-foreground">universal_metadata.json (Phase 2 - Complementary Data)</span>
+                  </div>
+                  <pre className="p-4 text-xs overflow-auto max-h-[400px]">
+                    {JSON.stringify(tender.universal_metadata, null, 2)}
                   </pre>
                 </div>
               )}

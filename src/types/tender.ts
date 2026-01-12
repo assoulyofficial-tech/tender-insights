@@ -55,12 +55,36 @@ export interface AvisMetadata {
   keywords: TenderKeywords;
 }
 
+// Deep analysis data for a lot (complementary to AvisMetadata)
+export interface LotDeepData {
+  lot_number: string;
+  caution_definitive_percentage?: TrackedValue<string>;
+  estimated_caution_definitive_value?: {
+    value: string | null;
+    currency: string | null;
+  };
+  execution_delay?: {
+    value: string | null;
+    unit: string | null;
+    source_document: DocumentType | null;
+  };
+  items: TenderItem[];
+}
+
+// Additional conditions from deep analysis
+export interface AdditionalConditions {
+  qualification_criteria: string | null;
+  required_documents: string[];
+  warranty_period: string | null;
+  payment_terms: string | null;
+}
+
 // Universal fields schema (Phase 2 - User Shift)
-export interface UniversalMetadata extends AvisMetadata {
+// Contains ONLY complementary data not in AvisMetadata
+export interface UniversalMetadata {
   institution_address: TrackedValue<string>;
-  lots: (TenderLot & {
-    items: TenderItem[];
-  })[];
+  lots_deep_data: LotDeepData[];
+  additional_conditions: AdditionalConditions;
 }
 
 // Document extracted from tender
