@@ -265,6 +265,54 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                                     "source_document": "WEBSITE",
                                     "source_date": None
                                 }
+                            
+                            # EXTENDED WEBSITE METADATA (new fields)
+                            website_extended = {}
+                            
+                            if web_meta.acheteur_public:
+                                website_extended["acheteur_public"] = {
+                                    "value": web_meta.acheteur_public,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if web_meta.lieu_execution:
+                                website_extended["lieu_execution"] = {
+                                    "value": web_meta.lieu_execution,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if web_meta.estimation_ttc:
+                                website_extended["estimation_ttc"] = {
+                                    "value": web_meta.estimation_ttc,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if web_meta.lieu_ouverture_plis:
+                                website_extended["lieu_ouverture_plis"] = {
+                                    "value": web_meta.lieu_ouverture_plis,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if web_meta.caution_provisoire:
+                                website_extended["caution_provisoire_website"] = {
+                                    "value": web_meta.caution_provisoire,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if web_meta.contact_administratif:
+                                website_extended["contact_administratif"] = {
+                                    "value": web_meta.contact_administratif,
+                                    "source_document": "WEBSITE",
+                                    "source_date": None
+                                }
+                            
+                            if website_extended:
+                                metadata["website_extended"] = website_extended
                         
                         tender.avis_metadata = metadata
                         tender.status = TenderStatus.LISTED
@@ -444,8 +492,19 @@ def analyze_tender(tender_id: str, db: Session = Depends(get_db)):
             success=True
         ))
     
-    # Run deep analysis
-    universal_metadata = ai_service.extract_universal_metadata(extraction_results)
+    # Extract website contact info if available (to be structured by AI)
+    website_contact_raw = None
+    if tender.avis_metadata:
+        website_extended = tender.avis_metadata.get("website_extended", {})
+        contact_info = website_extended.get("contact_administratif", {})
+        if contact_info and contact_info.get("value"):
+            website_contact_raw = contact_info.get("value")
+    
+    # Run deep analysis with website contact
+    universal_metadata = ai_service.extract_universal_metadata(
+        extraction_results,
+        website_contact_raw=website_contact_raw
+    )
     
     if universal_metadata:
         tender.universal_metadata = universal_metadata

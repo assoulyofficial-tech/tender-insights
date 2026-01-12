@@ -158,7 +158,8 @@ class AIService:
     
     def extract_universal_metadata(
         self,
-        documents: List[ExtractionResult]
+        documents: List[ExtractionResult],
+        website_contact_raw: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Phase 2: Deep analysis extraction
@@ -166,6 +167,7 @@ class AIService:
         
         Args:
             documents: All extracted documents for a tender
+            website_contact_raw: Raw contact text scraped from website (to be structured by AI)
         
         Returns:
             Universal metadata dict or None
@@ -191,6 +193,10 @@ class AIService:
             return None
         
         full_context = "\n\n".join(context_parts)
+        
+        # Add website contact info if available
+        if website_contact_raw:
+            full_context += f"\n\n=== CONTACT ADMINISTRATIF (Site Web - à structurer) ===\n{website_contact_raw}"
         
         logger.info("Starting universal metadata extraction...")
         
