@@ -44,6 +44,10 @@ class WebsiteMetadata:
     submission_deadline_date: Optional[str] = None  # DD/MM/YYYY
     submission_deadline_time: Optional[str] = None  # HH:MM
     subject: Optional[str] = None
+
+    # Full visible text extracted from "page de consultation" (used for AI parsing)
+    consultation_text: Optional[str] = None
+
     # Extended metadata (from expanded panel)
     acheteur_public: Optional[str] = None  # Buyer/purchasing entity
     lieu_execution: Optional[str] = None  # Execution location
@@ -228,14 +232,25 @@ class TenderScraper:
         try:
             # First, click the expansion button to reveal hidden data
             try:
-                expand_button = await page.query_selector('a.title-toggle[onclick*="infosPrincipales"]')
-                if expand_button:
-                    await expand_button.click()
-                    # Wait for expansion animation
-                    await page.wait_for_timeout(500)
-                    logger.debug("Clicked expansion button for additional metadata")
+                toggle = page.locator('a.title-toggle[onclick*="infosPrincipales"]').first
+                if await toggle.count() > 0:
+                    await toggle.click(force=True)
+                    # Wait a bit for JS toggle + layout
+                    await page.wait_for_timeout(800)
+                    logger.debug("Clicked infosPrincipales toggle")
             except Exception as e:
-                logger.debug(f"Could not click expansion button: {e}")
+                logger.debug(f"Could not click infosPrincipales toggle: {e}")
+
+            # Capture consultation text (after expansion) for AI parsing
+            try:
+                root = await page.query_selector('#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary')
+                if root:
+                    metadata.consultation_text = (await root.inner_text()).strip()
+                else:
+                    # Fallback: capture the whole body text (can be noisier but more robust)
+                    metadata.consultation_text = (await page.inner_text('body')).strip()
+            except Exception as e:
+                logger.debug(f"Could not capture consultation_text: {e}")
             
             # Extract reference
             ref_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference'
@@ -302,37 +317,35 @@ class TenderScraper:
                 metadata.caution_provisoire = (await caution_element.inner_text()).strip()
                 logger.debug(f"Extracted caution_provisoire: {metadata.caution_provisoire}")
             
-            # Contact Administratif - extract the contact section content
+            # Contact Administratif
+            # Prefer the user-provided XPath (if it exists), otherwise fallback to text parsing.
             try:
-                # Try to find the contact section by looking for elements containing contact info
-                contact_section = await page.evaluate('''() => {
-                    // Find the contact section - typically near the bottom of the expanded panel
-                    const labels = document.querySelectorAll('span[class*="label"], div[class*="label"]');
-                    for (const label of labels) {
-                        if (label.textContent && label.textContent.includes('Contact')) {
-                            // Get the parent row and extract all text from the value section
-                            const parent = label.closest('div[class*="row"], div[class*="bloc"]');
-                            if (parent) {
-                                const valueSpans = parent.querySelectorAll('span:not([class*="label"])');
-                                const texts = [];
-                                for (const span of valueSpans) {
-                                    const text = span.textContent.trim();
-                                    if (text && text.length > 0) {
-                                        texts.push(text);
-                                    }
-                                }
-                                return texts.join(' | ');
-                            }
-                        }
-                    }
-                    return null;
-                }''')
-                if contact_section:
-                    metadata.contact_administratif = contact_section.strip()
-                    logger.debug(f"Extracted contact_administratif: {metadata.contact_administratif[:100] if metadata.contact_administratif else 'None'}...")
+                xpath = '/html/body/form/div[3]/div[2]/div[4]/div[2]/div[1]/div[4]/div[16]/div[2]'
+                loc = page.locator(f'xpath={xpath}')
+                if await loc.count() > 0:
+                    txt = (await loc.first.inner_text()).strip()
+                    if txt:
+                        metadata.contact_administratif = txt
+                        logger.debug(f"Extracted contact_administratif (xpath): {txt[:100]}...")
             except Exception as e:
-                logger.debug(f"Could not extract contact info: {e}")
-                
+                logger.debug(f"XPath contact extraction failed: {e}")
+
+            # Fallback: heuristic extraction from consultation_text
+            if (not metadata.contact_administratif) and metadata.consultation_text:
+                try:
+                    t = metadata.consultation_text
+                    # Normalize spacing
+                    t_norm = "\n".join([ln.strip() for ln in t.splitlines() if ln.strip()])
+                    # Try to capture the block after 'Contact administratif'
+                    import re
+                    m = re.search(r"contact\s+administratif\s*[:\-]?\s*(.+)$", t_norm, re.IGNORECASE)
+                    if m:
+                        guess = m.group(1).strip()
+                        if len(guess) > 10:
+                            metadata.contact_administratif = guess
+                            logger.debug(f"Extracted contact_administratif (text): {guess[:100]}...")
+                except Exception as e:
+                    logger.debug(f"Heuristic contact extraction failed: {e}")
         except Exception as e:
             logger.warning(f"Failed to extract website metadata: {e}")
         
