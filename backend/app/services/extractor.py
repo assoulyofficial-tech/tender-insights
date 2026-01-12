@@ -1212,6 +1212,55 @@ def process_tender_zip(
     return extraction, classifications, source_type
 
 
+def extract_best_documents_for_phase1(
+    zip_files: Dict[str, io.BytesIO],
+    tender_reference: Optional[str] = None,
+) -> Tuple[Dict[DocumentType, ExtractionResult], List[FirstPageResult]]:
+    """Select and fully extract the best AVIS/RC/CPS documents for Phase-1 fallback logic.
+
+    AVIS is ignored if it looks like a multi-tender compilation.
+
+    Returns:
+        (extractions_by_type, classifications)
+    """
+    logger.info("Phase 1: Classifying all documents (for fallbacks)...")
+    classifications = classify_all_documents(zip_files)
+
+    avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
+    rc_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.RC]
+    cps_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.CPS]
+
+    best_avis = _select_best_document(avis_candidates, "Avis") if avis_candidates else None
+    if best_avis and _is_multi_tender_avis(best_avis.first_page_text, tender_reference):
+        logger.warning(f"Ignoring Avis '{best_avis.filename}' (multi-tender compilation)")
+        best_avis = None
+
+    best_rc = _select_best_document(rc_candidates, "RC") if rc_candidates else None
+    best_cps = _select_best_document(cps_candidates, "CPS") if cps_candidates else None
+
+    selections = [best_avis, best_rc, best_cps]
+    extractions: Dict[DocumentType, ExtractionResult] = {}
+
+    for info in selections:
+        if not info:
+            continue
+        if info.filename not in zip_files:
+            continue
+
+        file_bytes = zip_files[info.filename]
+        logger.info(f"Full extraction of {info.document_type.value}: {info.filename} (scanned={info.is_scanned})")
+        extracted = extract_full_document(info.filename, file_bytes, info.is_scanned)
+        if extracted and extracted.success:
+            extracted.document_type = info.document_type
+            extractions[info.document_type] = extracted
+
+    # Discard first-page texts
+    for c in classifications:
+        c.first_page_text = ""
+
+    return extractions, classifications
+
+
 # ============================
 # LEGACY FUNCTION (for backward compatibility)
 # ============================

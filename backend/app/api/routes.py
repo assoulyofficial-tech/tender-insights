@@ -15,9 +15,15 @@ from pydantic import BaseModel
 from uuid import UUID
 
 from app.core.database import get_db
-from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType
+from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType as ModelDocumentType
 from app.services.scraper import TenderScraper, ScraperProgress, WebsiteMetadata
-from app.services.extractor import process_tender_zip, ExtractionResult, ExtractionMethod, FirstPageResult
+from app.services.extractor import (
+    DocumentType as ExtractorDocumentType,
+    extract_best_documents_for_phase1,
+    ExtractionResult,
+    ExtractionMethod,
+)
+from app.services.phase1_merge import merge_phase1_metadata
 from app.services.ai_pipeline import ai_service
 
 router = APIRouter()
@@ -180,151 +186,102 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
             db.commit()
             return
         
-        # Process downloads using NEW workflow
+        # Process downloads using website-first + AVIS→RC→CPS fallback workflow
         extracted_count = 0
         for result in results:
-            if result.success and result.zip_bytes:
-                # Get website metadata (authoritative source)
-                web_meta = result.website_metadata
-                
-                # Create tender record with website reference if available
-                tender = Tender(
-                    external_reference=web_meta.reference_tender if web_meta and web_meta.reference_tender else f"tender_{result.index}",
-                    source_url=result.url,
-                    status=TenderStatus.PENDING,
-                    download_date=start_date or datetime.now().strftime("%Y-%m-%d")
+            if not (result.success and result.zip_bytes):
+                continue
+
+            web_meta = result.website_metadata
+
+            tender = Tender(
+                external_reference=web_meta.reference_tender if web_meta and web_meta.reference_tender else f"tender_{result.index}",
+                source_url=result.url,
+                status=TenderStatus.PENDING,
+                download_date=start_date or datetime.now().strftime("%Y-%m-%d"),
+            )
+            db.add(tender)
+            db.commit()
+            db.refresh(tender)
+
+            files = result.get_files()
+            tender_ref = web_meta.reference_tender if web_meta else None
+
+            # Extract best candidate documents for Phase-1 fallbacks
+            extractions, _classifications = extract_best_documents_for_phase1(files, tender_ref)
+
+            # Choose one document to store (for later deep analysis / Q&A)
+            doc_to_store = (
+                extractions.get(ExtractorDocumentType.AVIS)
+                or extractions.get(ExtractorDocumentType.RC)
+                or extractions.get(ExtractorDocumentType.CPS)
+            )
+
+            if doc_to_store and doc_to_store.success:
+                db_doc = TenderDocument(
+                    tender_id=tender.id,
+                    document_type=ModelDocumentType(doc_to_store.document_type.value),
+                    filename=doc_to_store.filename,
+                    raw_text=doc_to_store.text,
+                    page_count=doc_to_store.page_count,
+                    extraction_method=ModelDocumentType.DIGITAL.value if False else doc_to_store.extraction_method.value,
+                    file_size_bytes=doc_to_store.file_size_bytes,
+                    mime_type=doc_to_store.mime_type,
                 )
-                db.add(tender)
-                db.commit()
-                db.refresh(tender)
-                
-                # NEW WORKFLOW:
-                # 1. Classify all documents (first-page scan)
-                # 2. Find primary document (Avis preferred, CPS as fallback)
-                # 3. Extract FULL content of primary document ONLY
-                files = result.get_files()
-                tender_ref = web_meta.reference_tender if web_meta else None
-                primary_extraction, classifications, source_type = process_tender_zip(files, tender_ref)
-                
-                # Store only the primary document (Avis or CPS fallback)
-                if primary_extraction and primary_extraction.success:
-                    doc = TenderDocument(
-                        tender_id=tender.id,
-                        document_type=DocumentType(primary_extraction.document_type.value),
-                        filename=primary_extraction.filename,
-                        raw_text=primary_extraction.text,
-                        page_count=primary_extraction.page_count,
-                        extraction_method=primary_extraction.extraction_method.value,
-                        file_size_bytes=primary_extraction.file_size_bytes,
-                        mime_type=primary_extraction.mime_type
+                db.add(db_doc)
+
+                merged_metadata = None
+
+                # 1) WEBSITE (consultation text) first
+                if web_meta and web_meta.consultation_text:
+                    website_metadata = ai_service.extract_primary_metadata(
+                        web_meta.consultation_text,
+                        source_label="WEBSITE",
                     )
-                    db.add(doc)
-                    
-                    # Run AI extraction on primary document
-                    metadata = ai_service.extract_avis_metadata(primary_extraction.text)
-                    if metadata:
-                        # Update source_document fields to reflect actual source
-                        if source_type == "CPS":
-                            for key in metadata:
-                                if isinstance(metadata[key], dict) and "source_document" in metadata[key]:
-                                    metadata[key]["source_document"] = "CPS"
-                                elif isinstance(metadata[key], dict):
-                                    # Handle nested dicts like submission_deadline
-                                    for subkey in metadata[key]:
-                                        if isinstance(metadata[key][subkey], dict) and "source_document" in metadata[key][subkey]:
-                                            metadata[key][subkey]["source_document"] = "CPS"
-                        
-                        # WEBSITE METADATA OVERRIDE (Authoritative)
-                        # Reference, deadline, and subject from website take priority
-                        if web_meta:
-                            if web_meta.reference_tender:
-                                metadata["reference_tender"] = {
-                                    "value": web_meta.reference_tender,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                                tender.external_reference = web_meta.reference_tender
-                            
-                            if web_meta.submission_deadline_date or web_meta.submission_deadline_time:
-                                metadata["submission_deadline"] = {
-                                    "date": {
-                                        "value": web_meta.submission_deadline_date,
-                                        "source_document": "WEBSITE",
-                                        "source_date": None
-                                    },
-                                    "time": {
-                                        "value": web_meta.submission_deadline_time,
-                                        "source_document": "WEBSITE",
-                                        "source_date": None
-                                    }
-                                }
-                            
-                            if web_meta.subject:
-                                metadata["subject"] = {
-                                    "value": web_meta.subject,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            # EXTENDED WEBSITE METADATA (new fields)
-                            website_extended = {}
-                            
-                            if web_meta.acheteur_public:
-                                website_extended["acheteur_public"] = {
-                                    "value": web_meta.acheteur_public,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if web_meta.lieu_execution:
-                                website_extended["lieu_execution"] = {
-                                    "value": web_meta.lieu_execution,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if web_meta.estimation_ttc:
-                                website_extended["estimation_ttc"] = {
-                                    "value": web_meta.estimation_ttc,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if web_meta.lieu_ouverture_plis:
-                                website_extended["lieu_ouverture_plis"] = {
-                                    "value": web_meta.lieu_ouverture_plis,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if web_meta.caution_provisoire:
-                                website_extended["caution_provisoire_website"] = {
-                                    "value": web_meta.caution_provisoire,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if web_meta.contact_administratif:
-                                website_extended["contact_administratif"] = {
-                                    "value": web_meta.contact_administratif,
-                                    "source_document": "WEBSITE",
-                                    "source_date": None
-                                }
-                            
-                            if website_extended:
-                                metadata["website_extended"] = website_extended
-                        
-                        tender.avis_metadata = metadata
-                        tender.status = TenderStatus.LISTED
-                    else:
-                        tender.status = TenderStatus.ERROR
-                        tender.error_message = "AI extraction failed"
+                    merged_metadata = website_metadata
+
+                # 2) AVIS → RC → CPS fallbacks
+                for label, dt in [
+                    ("AVIS", ExtractorDocumentType.AVIS),
+                    ("RC", ExtractorDocumentType.RC),
+                    ("CPS", ExtractorDocumentType.CPS),
+                ]:
+                    ext = extractions.get(dt)
+                    if ext and ext.success and ext.text:
+                        fb = ai_service.extract_primary_metadata(ext.text, source_label=label)
+                        merged_metadata = merge_phase1_metadata(merged_metadata, fb)
+
+                if merged_metadata:
+                    # Persist website contact raw so Phase-2 can structure it
+                    if web_meta and web_meta.contact_administratif:
+                        merged_metadata.setdefault("website_extended", {})
+                        merged_metadata["website_extended"]["contact_administratif"] = {
+                            "value": web_meta.contact_administratif,
+                            "source_document": "WEBSITE",
+                            "source_date": None,
+                        }
+
+                    # Ensure tender.external_reference aligns with extracted reference when available
+                    ref_val = None
+                    if isinstance(merged_metadata.get("reference_tender"), dict):
+                        ref_val = merged_metadata["reference_tender"].get("value")
+                    if ref_val:
+                        tender.external_reference = ref_val
+                    elif web_meta and web_meta.reference_tender:
+                        tender.external_reference = web_meta.reference_tender
+
+                    tender.avis_metadata = merged_metadata
+                    tender.status = TenderStatus.LISTED
                 else:
                     tender.status = TenderStatus.ERROR
-                    tender.error_message = "No Avis or CPS document found in ZIP"
-                
-                db.commit()
-                extracted_count += 1
+                    tender.error_message = "Phase 1 extraction failed (website + AVIS/RC/CPS)"
+
+            else:
+                tender.status = TenderStatus.ERROR
+                tender.error_message = "No AVIS/RC/CPS document found in ZIP"
+
+            db.commit()
+            extracted_count += 1
         
         # Finalize job
         job.status = "COMPLETED"
@@ -480,10 +437,12 @@ def analyze_tender(tender_id: str, db: Session = Depends(get_db)):
     from app.services.extractor import ExtractionResult, ExtractionMethod
     
     extraction_results = []
+    from app.services.extractor import DocumentType as ExtractorDocumentType
+
     for doc in documents:
         extraction_results.append(ExtractionResult(
             filename=doc.filename,
-            document_type=DocumentType(doc.document_type.value) if doc.document_type else DocumentType.UNKNOWN,
+            document_type=ExtractorDocumentType(doc.document_type.value) if doc.document_type else ExtractorDocumentType.UNKNOWN,
             text=doc.raw_text or "",
             page_count=doc.page_count,
             extraction_method=ExtractionMethod(doc.extraction_method) if doc.extraction_method else ExtractionMethod.DIGITAL,
@@ -535,10 +494,12 @@ def ask_ai_about_tender(
     from app.services.extractor import ExtractionResult, ExtractionMethod
     
     extraction_results = []
+    from app.services.extractor import DocumentType as ExtractorDocumentType
+
     for doc in documents:
         extraction_results.append(ExtractionResult(
             filename=doc.filename,
-            document_type=DocumentType(doc.document_type.value) if doc.document_type else DocumentType.UNKNOWN,
+            document_type=ExtractorDocumentType(doc.document_type.value) if doc.document_type else ExtractorDocumentType.UNKNOWN,
             text=doc.raw_text or "",
             page_count=doc.page_count,
             extraction_method=ExtractionMethod(doc.extraction_method) if doc.extraction_method else ExtractionMethod.DIGITAL,

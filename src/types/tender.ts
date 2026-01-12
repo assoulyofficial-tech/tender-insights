@@ -54,6 +54,8 @@ export interface AvisMetadata {
   reference_tender: TrackedValue<string>;
   tender_type: TrackedValue<TenderType>;
   issuing_institution: TrackedValue<string>;
+  // NEW: Lieu d'exécution (website + docs fallbacks)
+  execution_location?: TrackedValue<string>;
   submission_deadline: {
     date: TrackedValue<string>;
     time: TrackedValue<string>;

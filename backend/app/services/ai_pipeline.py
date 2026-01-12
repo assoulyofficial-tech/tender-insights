@@ -40,6 +40,7 @@ class AvisMetadata:
 
 # Lazy-loaded prompts from external files to avoid encoding issues
 AVIS_EXTRACTION_PROMPT = None
+PRIMARY_METADATA_PROMPT = None
 UNIVERSAL_EXTRACTION_PROMPT = None
 ASK_AI_PROMPT = None
 
@@ -50,6 +51,14 @@ def get_avis_extraction_prompt() -> str:
     if AVIS_EXTRACTION_PROMPT is None:
         AVIS_EXTRACTION_PROMPT = _load_prompt("avis_extraction_prompt.txt")
     return AVIS_EXTRACTION_PROMPT
+
+
+def get_primary_metadata_prompt() -> str:
+    """Get the PRIMARY_METADATA_PROMPT, loading from file if needed"""
+    global PRIMARY_METADATA_PROMPT
+    if PRIMARY_METADATA_PROMPT is None:
+        PRIMARY_METADATA_PROMPT = _load_prompt("primary_metadata_extraction_prompt.txt")
+    return PRIMARY_METADATA_PROMPT
 
 
 def get_universal_extraction_prompt() -> str:
@@ -101,60 +110,74 @@ class AIService:
             logger.error(f"AI API call failed: {e}")
             return None
     
-    def extract_avis_metadata(
-        self, 
-        avis_text: str,
-        source_date: Optional[str] = None
+    def extract_primary_metadata(
+        self,
+        source_text: str,
+        source_label: str,
+        source_date: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Extract Phase-1 (primary) metadata from any source text.
+
+        source_label must be one of: WEBSITE, AVIS, RC, CPS.
+        The prompt enforces that `source_document` matches this label.
         """
-        Phase 1: Extract Avis metadata
-        
-        Args:
-            avis_text: Raw text from Avis document
-            source_date: Date the document was published
-        
-        Returns:
-            Structured metadata dict or None on failure
-        """
-        if not avis_text or len(avis_text.strip()) < 50:
-            logger.warning("Avis text too short for extraction")
+        if not source_text or len(source_text.strip()) < 50:
+            logger.warning("Source text too short for primary metadata extraction")
             return None
-        
-        logger.info("Starting Avis metadata extraction...")
-        
+
+        logger.info(f"Starting primary metadata extraction (source={source_label})...")
+
         response = self._call_ai(
-            get_avis_extraction_prompt(),
-            f"Extrait les métadonnées de ce document Avis:\n\n{avis_text[:15000]}"  # Limit context
+            get_primary_metadata_prompt(),
+            f"SOURCE_LABEL: {source_label}\n\nTEXTE À ANALYSER:\n\n{source_text[:20000]}",
         )
-        
+
         if not response:
             return None
-        
+
         try:
-            # Parse JSON from response
-            # Handle potential markdown code blocks
+            # Parse JSON from response (handle potential markdown code blocks)
             json_str = response
             if "```json" in response:
                 json_str = response.split("```json")[1].split("```")[0]
             elif "```" in response:
                 json_str = response.split("```")[1].split("```")[0]
-            
+
             metadata = json.loads(json_str.strip())
-            
+
             # Inject source_date if provided
             if source_date:
-                for key in ['reference_tender', 'tender_type', 'issuing_institution', 
-                           'folder_opening_location', 'subject', 'total_estimated_value']:
-                    if key in metadata and isinstance(metadata[key], dict):
-                        metadata[key]['source_date'] = source_date
-            
-            logger.info("Avis metadata extraction complete")
+                def _inject(obj: Any):
+                    if isinstance(obj, dict) and "source_date" in obj:
+                        obj["source_date"] = source_date
+                    return obj
+
+                for k, v in list(metadata.items()):
+                    if isinstance(v, dict) and "source_date" in v:
+                        metadata[k] = _inject(v)
+                # submission_deadline nested
+                if isinstance(metadata.get("submission_deadline"), dict):
+                    sd = metadata["submission_deadline"]
+                    if isinstance(sd.get("date"), dict):
+                        _inject(sd["date"])
+                    if isinstance(sd.get("time"), dict):
+                        _inject(sd["time"])
+
+            logger.info("Primary metadata extraction complete")
             return metadata
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse AI response as JSON: {e}")
             logger.debug(f"Response was: {response[:500]}")
             return None
+
+    def extract_avis_metadata(
+        self,
+        avis_text: str,
+        source_date: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Backward compatible wrapper (Phase 1)."""
+        return self.extract_primary_metadata(avis_text, source_label="AVIS", source_date=source_date)
     
     def extract_universal_metadata(
         self,
