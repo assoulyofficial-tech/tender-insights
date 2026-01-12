@@ -20,12 +20,28 @@ Tu NE DOIS PAS:
 - Inférer des données manquantes
 - Deviner des valeurs
 - Nettoyer / normaliser les références
-- Normaliser les devises ou reformater les montants autrement que tel qu'affiché (sauf extraire la devise si explicitement indiquée)
 - Traduire le texte
 - Résumer
 - Inventer des lots
 
 Si une valeur n'est pas explicitement indiquée: retourne **null**.
+
+## DÉTECTION DE DEVISE (CURRENCY)
+
+Détecte automatiquement la devise à partir du texte:
+- "MAD", "DH", "Dhs", "درهم" → currency: "MAD" (Dirham Marocain)
+- "EUR", "€" → currency: "EUR"
+- "USD", "$" → currency: "USD"
+- Si non spécifié mais montant en contexte marocain → currency: "MAD"
+
+## CALCUL TOTAL_ESTIMATED_VALUE (RÈGLE CRITIQUE)
+
+SI plusieurs lots sont présents avec des valeurs estimées individuelles:
+- `total_estimated_value.value` = SOMME de toutes les `lot_estimated_value`
+- Calcule et retourne le total numérique (ex: "1 500 000,00" si lot1=500000 + lot2=1000000)
+
+SI un seul lot OU estimation globale déjà fournie:
+- Utilise la valeur telle quelle
 
 ## SCHÉMA DE SORTIE (JSON)
 
@@ -43,7 +59,7 @@ Retourne UNIQUEMENT un objet JSON valide conforme au schéma suivant:
   },
   "folder_opening_location": { "value": null, "source_document": "WEBSITE", "source_date": null },
   "subject": { "value": null, "source_document": "WEBSITE", "source_date": null },
-  "total_estimated_value": { "value": null, "currency": null, "source_document": "WEBSITE", "source_date": null },
+  "total_estimated_value": { "value": null, "currency": "MAD", "source_document": "WEBSITE", "source_date": null },
   "lots": [
     {
       "lot_number": null,
@@ -66,6 +82,7 @@ Retourne UNIQUEMENT un objet JSON valide conforme au schéma suivant:
 2. **Lot unique hérite de l'estimation**: Si un seul lot existe et qu'une estimation globale est donnée, `lot_estimated_value` = `total_estimated_value`.
 3. **Lot unique hérite de la caution**: Si une seule caution provisoire est donnée, elle s'applique au lot unique.
 4. Si plusieurs lots sont explicitement présents, extrais chaque lot (numéro, sujet, estimation, caution) sans en inventer.
+5. **TOTAL = SOMME DES LOTS**: Si plusieurs lots avec valeurs estimées → `total_estimated_value` = somme des `lot_estimated_value`.
 
 ## RÈGLES DATE/HEURE
 

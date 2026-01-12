@@ -47,6 +47,9 @@ class WebsiteMetadata:
 
     # Full visible text extracted from "page de consultation" (used for AI parsing)
     consultation_text: Optional[str] = None
+    
+    # Lot details popup text (for multi-lot tenders)
+    lots_popup_text: Optional[str] = None
 
     # Extended metadata (from expanded panel)
     acheteur_public: Optional[str] = None  # Buyer/purchasing entity
@@ -55,6 +58,33 @@ class WebsiteMetadata:
     lieu_ouverture_plis: Optional[str] = None  # Bid opening location
     caution_provisoire: Optional[str] = None  # Provisional guarantee
     contact_administratif: Optional[str] = None  # Administrative contact (raw text)
+    
+    def is_complete(self) -> bool:
+        """Check if all critical fields are present (no fallback needed)"""
+        critical_fields = [
+            self.reference_tender,
+            self.subject,
+            self.submission_deadline_date,
+            self.acheteur_public or self.lieu_execution,
+            self.estimation_ttc,
+        ]
+        return all(f is not None and str(f).strip() for f in critical_fields)
+
+
+@dataclass
+class ScrapedTender:
+    """Tender result from website scraping (no ZIP download yet)"""
+    index: int
+    url: str
+    success: bool
+    error: str = ""
+    website_metadata: Optional[WebsiteMetadata] = None
+    
+    def needs_document_download(self) -> bool:
+        """Check if we need to download documents for fallback"""
+        if not self.website_metadata:
+            return True
+        return not self.website_metadata.is_complete()
 
 
 @dataclass
@@ -215,6 +245,7 @@ class TenderScraper:
         This data is AUTHORITATIVE and overrides document values.
         
         Clicks on expansion button to reveal additional data before extraction.
+        Also clicks on "Détail des lots" button to get lot details popup.
         
         HTML selectors:
         - Reference: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference
@@ -241,6 +272,66 @@ class TenderScraper:
             except Exception as e:
                 logger.debug(f"Could not click infosPrincipales toggle: {e}")
 
+            # Click on "Détail des lots" button if present (for multi-lot tenders)
+            try:
+                lot_detail_btn = page.locator('img[src*="picto-details.gif"][alt*="Détail des lots"]')
+                if await lot_detail_btn.count() > 0:
+                    await lot_detail_btn.first.click(force=True)
+                    await page.wait_for_timeout(1000)
+                    logger.debug("Clicked Détail des lots button")
+                    
+                    # Try to capture popup content
+                    # Common popup selectors
+                    popup_selectors = [
+                        '.popup-content',
+                        '.modal-body',
+                        '#popup-lots',
+                        '[role="dialog"]',
+                        '.ui-dialog-content',
+                        '.fancybox-inner',
+                    ]
+                    
+                    for selector in popup_selectors:
+                        try:
+                            popup = page.locator(selector).first
+                            if await popup.count() > 0:
+                                popup_text = (await popup.inner_text()).strip()
+                                if popup_text and len(popup_text) > 20:
+                                    metadata.lots_popup_text = popup_text
+                                    logger.debug(f"Captured lots popup: {popup_text[:100]}...")
+                                    break
+                        except Exception:
+                            continue
+                    
+                    # If no specific popup found, try to capture any new visible content
+                    if not metadata.lots_popup_text:
+                        try:
+                            # Wait for any overlay/modal to appear
+                            await page.wait_for_timeout(500)
+                            # Try to get visible overlay text
+                            overlay = page.locator('div[style*="display: block"], div[class*="visible"], div[class*="open"]').first
+                            if await overlay.count() > 0:
+                                overlay_text = (await overlay.inner_text()).strip()
+                                if overlay_text and "lot" in overlay_text.lower():
+                                    metadata.lots_popup_text = overlay_text
+                                    logger.debug(f"Captured overlay text: {overlay_text[:100]}...")
+                        except Exception:
+                            pass
+                    
+                    # Try to close the popup
+                    try:
+                        close_btn = page.locator('button[class*="close"], .close, [aria-label="Close"]').first
+                        if await close_btn.count() > 0:
+                            await close_btn.click(force=True)
+                            await page.wait_for_timeout(300)
+                    except Exception:
+                        # Press Escape to close
+                        await page.keyboard.press('Escape')
+                        await page.wait_for_timeout(300)
+                        
+            except Exception as e:
+                logger.debug(f"Could not click Détail des lots: {e}")
+
             # Capture consultation text (after expansion) for AI parsing
             try:
                 root = await page.query_selector('#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary')
@@ -251,6 +342,10 @@ class TenderScraper:
                     metadata.consultation_text = (await page.inner_text('body')).strip()
             except Exception as e:
                 logger.debug(f"Could not capture consultation_text: {e}")
+            
+            # Append lots popup text to consultation text if available
+            if metadata.lots_popup_text:
+                metadata.consultation_text = (metadata.consultation_text or "") + "\n\n=== DÉTAIL DES LOTS ===\n" + metadata.lots_popup_text
             
             # Extract reference
             ref_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference'
@@ -351,6 +446,181 @@ class TenderScraper:
         
         return metadata
     
+    async def scrape_single_tender(
+        self,
+        context,
+        tender_url: str,
+        idx: int,
+        semaphore: asyncio.Semaphore
+    ) -> ScrapedTender:
+        """
+        Scrape a single tender page WITHOUT downloading the ZIP.
+        Only extracts website metadata.
+        
+        Returns:
+            ScrapedTender with website metadata (no ZIP bytes)
+        """
+        async with semaphore:
+            if self._stop_requested:
+                return ScrapedTender(idx, tender_url, False, "Stopped by user")
+            
+            tender_page = None
+            website_metadata = None
+            try:
+                tender_page = await context.new_page()
+                
+                # Navigate to tender page
+                await tender_page.goto(
+                    tender_url, 
+                    timeout=settings.SCRAPER_TIMEOUT_PAGE
+                )
+                
+                # Extract website metadata (no download)
+                website_metadata = await self.extract_website_metadata(tender_page)
+                
+                ref_display = website_metadata.reference_tender if website_metadata and website_metadata.reference_tender else f"tender_{idx}"
+                self.progress.log(
+                    "success", 
+                    f"Scraped: {ref_display}"
+                )
+                self._update_progress()
+                
+                return ScrapedTender(
+                    index=idx,
+                    url=tender_url,
+                    success=True,
+                    website_metadata=website_metadata
+                )
+                
+            except PlaywrightTimeout as e:
+                self.progress.failed += 1
+                self.progress.log("error", f"Timeout on tender #{idx}")
+                self._update_progress()
+                return ScrapedTender(idx, tender_url, False, f"Timeout: {str(e)[:100]}")
+                
+            except Exception as e:
+                self.progress.failed += 1
+                self.progress.log("error", f"Failed tender #{idx}: {type(e).__name__}")
+                self._update_progress()
+                return ScrapedTender(idx, tender_url, False, f"{type(e).__name__}: {str(e)[:100]}")
+                
+            finally:
+                if tender_page:
+                    await tender_page.close()
+    
+    async def download_tender_zip(
+        self,
+        context,
+        tender_url: str,
+        idx: int,
+        website_metadata: Optional[WebsiteMetadata] = None
+    ) -> DownloadedTender:
+        """
+        Download the ZIP file for a specific tender.
+        Called only when website data is insufficient.
+        
+        Returns:
+            DownloadedTender with ZIP bytes in memory
+        """
+        tender_page = None
+        try:
+            tender_page = await context.new_page()
+            
+            # Navigate to tender page
+            await tender_page.goto(
+                tender_url, 
+                timeout=settings.SCRAPER_TIMEOUT_PAGE
+            )
+            
+            # Click download button
+            await tender_page.click(
+                'a[id="ctl0_CONTENU_PAGE_linkDownloadDce"]',
+                timeout=settings.SCRAPER_TIMEOUT_PAGE // 2
+            )
+            
+            # Wait for form
+            await tender_page.wait_for_selector(
+                '#ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande_nom',
+                timeout=settings.SCRAPER_TIMEOUT_PAGE // 2
+            )
+            
+            # Fill form
+            await tender_page.check(
+                '#ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande_accepterConditions'
+            )
+            await tender_page.fill(
+                '#ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande_nom',
+                settings.FORM_NOM
+            )
+            await tender_page.fill(
+                '#ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande_prenom',
+                settings.FORM_PRENOM
+            )
+            await tender_page.fill(
+                '#ctl0_CONTENU_PAGE_EntrepriseFormulaireDemande_email',
+                settings.FORM_EMAIL
+            )
+            
+            # Submit form
+            await tender_page.click('#ctl0_CONTENU_PAGE_validateButton')
+            
+            # Wait for download button
+            await tender_page.wait_for_selector(
+                '#ctl0_CONTENU_PAGE_EntrepriseDownloadDce_completeDownload',
+                timeout=settings.SCRAPER_TIMEOUT_PAGE // 2
+            )
+            
+            # Trigger download and capture to memory
+            async with tender_page.expect_download(
+                timeout=settings.SCRAPER_TIMEOUT_DOWNLOAD
+            ) as download_info:
+                await tender_page.click(
+                    '#ctl0_CONTENU_PAGE_EntrepriseDownloadDce_completeDownload'
+                )
+            
+            download = await download_info.value
+            
+            # Read download to memory (NO DISK WRITE)
+            path = await download.path()
+            if path:
+                with open(path, 'rb') as f:
+                    zip_bytes = f.read()
+            else:
+                zip_bytes = await download.read_bytes() if hasattr(download, 'read_bytes') else None
+            
+            self.progress.downloaded += 1
+            ref_display = website_metadata.reference_tender if website_metadata and website_metadata.reference_tender else f"tender_{idx}"
+            self.progress.log(
+                "success", 
+                f"Downloaded ZIP: {ref_display} ({download.suggested_filename[:30]})"
+            )
+            self._update_progress()
+            
+            return DownloadedTender(
+                index=idx,
+                url=tender_url,
+                success=True,
+                zip_bytes=zip_bytes,
+                suggested_filename=download.suggested_filename,
+                website_metadata=website_metadata
+            )
+            
+        except PlaywrightTimeout as e:
+            self.progress.failed += 1
+            self.progress.log("error", f"Timeout downloading tender #{idx}")
+            self._update_progress()
+            return DownloadedTender(idx, tender_url, False, f"Timeout: {str(e)[:100]}", website_metadata=website_metadata)
+            
+        except Exception as e:
+            self.progress.failed += 1
+            self.progress.log("error", f"Failed to download tender #{idx}: {type(e).__name__}")
+            self._update_progress()
+            return DownloadedTender(idx, tender_url, False, f"{type(e).__name__}: {str(e)[:100]}", website_metadata=website_metadata)
+            
+        finally:
+            if tender_page:
+                await tender_page.close()
+    
     async def download_single_tender(
         self,
         context,
@@ -359,7 +629,8 @@ class TenderScraper:
         semaphore: asyncio.Semaphore
     ) -> DownloadedTender:
         """
-        Download a single tender to memory and extract website metadata
+        LEGACY: Download a single tender to memory and extract website metadata.
+        Use scrape_single_tender + download_tender_zip for optimized flow.
         
         Returns:
             DownloadedTender with ZIP bytes in memory and website metadata
@@ -431,14 +702,11 @@ class TenderScraper:
                 download = await download_info.value
                 
                 # Read download to memory (NO DISK WRITE)
-                # Playwright requires saving to get bytes, so we use a temp approach
-                # that reads immediately into memory
                 path = await download.path()
                 if path:
                     with open(path, 'rb') as f:
                         zip_bytes = f.read()
                 else:
-                    # Fallback: stream directly
                     zip_bytes = await download.read_bytes() if hasattr(download, 'read_bytes') else None
                 
                 self.progress.downloaded += 1
@@ -480,14 +748,18 @@ class TenderScraper:
         end_date: Optional[str] = None
     ) -> List[DownloadedTender]:
         """
-        Execute full scraping run
+        Execute full scraping run with LAZY DOWNLOAD optimization.
+        
+        1. Scrape website metadata for all tenders (no download)
+        2. For tenders with incomplete data, download ZIP for fallback
+        3. Return list of DownloadedTender (some may have zip_bytes=None if website was sufficient)
         
         Args:
             start_date: Start date to scrape (YYYY-MM-DD). Defaults to yesterday.
             end_date: End date to scrape (YYYY-MM-DD). Defaults to start_date.
         
         Returns:
-            List of DownloadedTender objects with ZIP bytes in memory
+            List of DownloadedTender objects (with or without ZIP bytes)
         """
         self._stop_requested = False
         self.progress = ScraperProgress(is_running=True)
@@ -502,7 +774,7 @@ class TenderScraper:
             end_date = start_date
         
         self.progress.log("info", "=" * 50)
-        self.progress.log("info", f"Starting scraper")
+        self.progress.log("info", f"Starting scraper (optimized)")
         self.progress.log("info", f"Date range: {start_date} → {end_date}")
         self.progress.log("info", "=" * 50)
         
@@ -534,27 +806,67 @@ class TenderScraper:
                     self.progress.log("warning", "No tenders found")
                     return []
                 
-                # Phase 3: Download tenders
-                self.progress.phase = f"Downloading {len(tender_links)} tenders"
-                self.progress.log("info", f"Using {settings.SCRAPER_MAX_CONCURRENT} concurrent workers")
+                # Phase 3: Scrape website metadata (NO DOWNLOAD YET)
+                self.progress.phase = f"Scraping {len(tender_links)} tender pages"
+                self.progress.log("info", f"Phase 3: Extracting website metadata (no download)")
                 self._update_progress()
                 
                 semaphore = asyncio.Semaphore(settings.SCRAPER_MAX_CONCURRENT)
                 
-                # Create download tasks
-                tasks = [
-                    self.download_single_tender(context, url, idx, semaphore)
+                # Scrape all tender pages
+                scrape_tasks = [
+                    self.scrape_single_tender(context, url, idx, semaphore)
                     for idx, url in enumerate(tender_links, 1)
                 ]
                 
-                # Execute with gather
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Filter out exceptions
-                results = [
-                    r for r in results 
-                    if isinstance(r, DownloadedTender)
+                scraped_tenders = await asyncio.gather(*scrape_tasks, return_exceptions=True)
+                scraped_tenders = [
+                    t for t in scraped_tenders 
+                    if isinstance(t, ScrapedTender)
                 ]
+                
+                # Phase 4: Download ZIPs only for incomplete tenders
+                needs_download = [t for t in scraped_tenders if t.success and t.needs_document_download()]
+                complete_tenders = [t for t in scraped_tenders if t.success and not t.needs_document_download()]
+                
+                self.progress.log("info", f"Complete from website: {len(complete_tenders)}")
+                self.progress.log("info", f"Need document fallback: {len(needs_download)}")
+                
+                # Convert complete tenders to DownloadedTender (no ZIP)
+                for scraped in complete_tenders:
+                    results.append(DownloadedTender(
+                        index=scraped.index,
+                        url=scraped.url,
+                        success=True,
+                        zip_bytes=None,  # No download needed
+                        website_metadata=scraped.website_metadata
+                    ))
+                
+                if needs_download:
+                    self.progress.phase = f"Downloading {len(needs_download)} ZIPs (fallback)"
+                    self.progress.log("info", f"Phase 4: Downloading documents for {len(needs_download)} incomplete tenders")
+                    self._update_progress()
+                    
+                    for scraped in needs_download:
+                        if self._stop_requested:
+                            break
+                        downloaded = await self.download_tender_zip(
+                            context, 
+                            scraped.url, 
+                            scraped.index, 
+                            scraped.website_metadata
+                        )
+                        results.append(downloaded)
+                
+                # Add failed scraped tenders as failed downloads
+                for scraped in scraped_tenders:
+                    if not scraped.success:
+                        results.append(DownloadedTender(
+                            index=scraped.index,
+                            url=scraped.url,
+                            success=False,
+                            error=scraped.error
+                        ))
                 
             finally:
                 await browser.close()
@@ -567,9 +879,11 @@ class TenderScraper:
         
         success_count = sum(1 for r in results if r.success)
         fail_count = sum(1 for r in results if not r.success)
+        download_count = sum(1 for r in results if r.success and r.zip_bytes)
         
         self.progress.log("info", "=" * 50)
-        self.progress.log("success", f"Downloaded: {success_count}/{len(tender_links)}")
+        self.progress.log("success", f"Scraped: {success_count}/{len(tender_links)}")
+        self.progress.log("info", f"ZIP Downloads: {download_count} (only for incomplete)")
         self.progress.log("error" if fail_count else "success", f"Failed: {fail_count}")
         self.progress.log("info", f"Time: {elapsed:.1f}s")
         self.progress.log("info", "=" * 50)

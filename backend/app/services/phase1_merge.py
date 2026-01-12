@@ -3,6 +3,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+# Required fields for metadata to be considered "complete"
+REQUIRED_FIELDS = [
+    "reference_tender",
+    "subject",
+    "submission_deadline",
+    "issuing_institution",
+]
+
+
 def _is_blank_str(v: Any) -> bool:
     return isinstance(v, str) and v.strip() == ""
 
@@ -105,6 +114,56 @@ def _merge_lots(base: Any, fallback: Any) -> Any:
 
     # If base had lots but all were empty and fallback has more, keep base length (no invention)
     return merged
+
+
+def is_metadata_complete(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Check if all required fields are present and non-empty."""
+    if not metadata:
+        return False
+    
+    for field in REQUIRED_FIELDS:
+        val = metadata.get(field)
+        if val is None:
+            return False
+        
+        # For TrackedValue fields
+        if isinstance(val, dict):
+            if "value" in val:
+                if _tracked_missing(val):
+                    return False
+            # For submission_deadline which has nested date/time
+            elif "date" in val:
+                if _tracked_missing(val.get("date")):
+                    return False
+        elif _is_blank_str(val):
+            return False
+    
+    return True
+
+
+def get_missing_fields(metadata: Optional[Dict[str, Any]]) -> List[str]:
+    """Return list of field names that are missing or empty."""
+    if not metadata:
+        return REQUIRED_FIELDS.copy()
+    
+    missing = []
+    for field in REQUIRED_FIELDS:
+        val = metadata.get(field)
+        if val is None:
+            missing.append(field)
+            continue
+        
+        if isinstance(val, dict):
+            if "value" in val:
+                if _tracked_missing(val):
+                    missing.append(field)
+            elif "date" in val:
+                if _tracked_missing(val.get("date")):
+                    missing.append(field)
+        elif _is_blank_str(val):
+            missing.append(field)
+    
+    return missing
 
 
 def merge_phase1_metadata(
