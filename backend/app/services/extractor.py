@@ -977,61 +977,160 @@ def _is_arabic_document(filename: str, first_page_text: str) -> bool:
     return False
 
 
+def _is_multi_tender_avis(first_page_text: str, tender_reference: Optional[str] = None) -> bool:
+    """
+    Detect if an Avis contains multiple tenders (compiled from same organization).
+    
+    Indicators of multi-tender Avis:
+    1. Multiple reference numbers in the first page
+    2. Phrases like "appels d'offres suivants", "marchés suivants"
+    3. Table-like structure with multiple tender entries
+    """
+    if not first_page_text:
+        return False
+    
+    text_lower = first_page_text.lower()
+    
+    # Check for multi-tender phrases
+    multi_tender_indicators = [
+        "appels d'offres suivants",
+        "marchés suivants",
+        "consultations suivantes",
+        "liste des appels",
+        "tableau des marchés",
+        "les références ci-après",
+        "les marchés ci-après",
+    ]
+    
+    for indicator in multi_tender_indicators:
+        if indicator in text_lower:
+            logger.warning(f"Multi-tender indicator found: '{indicator}'")
+            return True
+    
+    # Count reference patterns (e.g., "N° 01/2024", "Ref: 123/2024")
+    ref_patterns = [
+        r'n[°o]?\s*\d+[/\-]\d{4}',
+        r'ref[:\s]+\d+[/\-]\d{4}',
+        r'\d+[/\-]ao[/\-]\d{4}',
+    ]
+    
+    ref_count = 0
+    for pattern in ref_patterns:
+        matches = re.findall(pattern, text_lower)
+        ref_count += len(matches)
+    
+    # If more than 3 reference-like patterns, likely multi-tender
+    if ref_count > 3:
+        logger.warning(f"Multiple reference patterns detected ({ref_count}), likely multi-tender Avis")
+        return True
+    
+    return False
+
+
+def _select_best_document(candidates: List[FirstPageResult], doc_type_name: str) -> Optional[FirstPageResult]:
+    """
+    Select best document from candidates, prioritizing French over Arabic.
+    """
+    if not candidates:
+        return None
+    
+    french_docs = []
+    arabic_docs = []
+    neutral_docs = []
+    
+    for doc in candidates:
+        is_french = _is_french_document(doc.filename, doc.first_page_text)
+        is_arabic = _is_arabic_document(doc.filename, doc.first_page_text)
+        
+        logger.debug(f"  {doc.filename}: french={is_french}, arabic={is_arabic}")
+        
+        if is_french and not is_arabic:
+            french_docs.append(doc)
+        elif is_arabic and not is_french:
+            arabic_docs.append(doc)
+        else:
+            neutral_docs.append(doc)
+    
+    # Priority 1: Explicit French documents
+    if french_docs:
+        logger.success(f"Selected French {doc_type_name}: {french_docs[0].filename}")
+        return french_docs[0]
+    
+    # Priority 2: Neutral documents (not marked as Arabic)
+    if neutral_docs:
+        logger.success(f"Selected neutral {doc_type_name} (not Arabic): {neutral_docs[0].filename}")
+        return neutral_docs[0]
+    
+    # Priority 3: Arabic documents (only if no other choice)
+    if arabic_docs:
+        logger.warning(f"Only Arabic {doc_type_name} available: {arabic_docs[0].filename}")
+        return arabic_docs[0]
+    
+    return candidates[0]
+
+
+def find_primary_document(
+    classifications: List[FirstPageResult],
+    tender_reference: Optional[str] = None
+) -> Tuple[Optional[FirstPageResult], str]:
+    """
+    STEP 2: Find the primary document for extraction.
+    
+    PRIORITY:
+    1. Avis de Consultation (if valid, single-tender)
+    2. CPS (fallback if Avis not found OR Avis is multi-tender)
+    
+    Returns:
+        Tuple of (document_info, source_type) where source_type is "AVIS" or "CPS"
+    """
+    avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
+    cps_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.CPS]
+    
+    logger.info(f"Found {len(avis_candidates)} Avis, {len(cps_candidates)} CPS candidates")
+    
+    # Try Avis first
+    if avis_candidates:
+        logger.info(f"Evaluating {len(avis_candidates)} Avis candidates...")
+        best_avis = _select_best_document(avis_candidates, "Avis")
+        
+        if best_avis:
+            # Check if this Avis is a multi-tender compilation
+            if _is_multi_tender_avis(best_avis.first_page_text, tender_reference):
+                logger.warning(f"Avis '{best_avis.filename}' appears to be multi-tender compilation")
+                logger.info("Falling back to CPS...")
+            else:
+                logger.success(f"Using Avis: {best_avis.filename}")
+                return best_avis, "AVIS"
+    else:
+        logger.warning("No Avis document found in ZIP")
+    
+    # Fallback to CPS
+    if cps_candidates:
+        logger.info(f"Falling back to CPS ({len(cps_candidates)} candidates)...")
+        best_cps = _select_best_document(cps_candidates, "CPS")
+        
+        if best_cps:
+            logger.success(f"Using CPS as fallback: {best_cps.filename}")
+            return best_cps, "CPS"
+    
+    logger.error("No Avis or CPS found - cannot extract tender metadata")
+    return None, ""
+
+
 def find_avis_document(classifications: List[FirstPageResult]) -> Optional[FirstPageResult]:
     """
     STEP 2: Find the Avis de Consultation from classification results.
     Returns the Avis document info, or None if not found.
     
+    LEGACY WRAPPER: Now uses find_primary_document internally.
+    For new code, use find_primary_document which also returns source type.
+    
     PRIORITY: 
-    1. Explicitly marked French version
-    2. Document with French content (not Arabic)
-    3. Any non-Arabic version
-    4. Arabic version (only if no other option)
+    1. Avis (if valid single-tender)
+    2. CPS (fallback if Avis not found or is multi-tender)
     """
-    avis_candidates = [r for r in classifications if r.success and r.document_type == DocumentType.AVIS]
-    
-    if not avis_candidates:
-        logger.warning("No Avis document found in ZIP")
-        return None
-    
-    logger.info(f"Found {len(avis_candidates)} Avis candidates, selecting best version...")
-    
-    # Categorize candidates
-    french_docs = []
-    arabic_docs = []
-    neutral_docs = []
-    
-    for avis in avis_candidates:
-        is_french = _is_french_document(avis.filename, avis.first_page_text)
-        is_arabic = _is_arabic_document(avis.filename, avis.first_page_text)
-        
-        logger.debug(f"  {avis.filename}: french={is_french}, arabic={is_arabic}")
-        
-        if is_french and not is_arabic:
-            french_docs.append(avis)
-        elif is_arabic and not is_french:
-            arabic_docs.append(avis)
-        else:
-            neutral_docs.append(avis)
-    
-    # Priority 1: Explicit French documents
-    if french_docs:
-        logger.success(f"Selected French Avis: {french_docs[0].filename}")
-        return french_docs[0]
-    
-    # Priority 2: Neutral documents (not marked as Arabic)
-    if neutral_docs:
-        logger.success(f"Selected neutral Avis (not Arabic): {neutral_docs[0].filename}")
-        return neutral_docs[0]
-    
-    # Priority 3: Arabic documents (only if no other choice)
-    if arabic_docs:
-        logger.warning(f"Only Arabic Avis available: {arabic_docs[0].filename}")
-        return arabic_docs[0]
-    
-    # Fallback (shouldn't reach here)
-    logger.success(f"Fallback Avis: {avis_candidates[0].filename}")
-    return avis_candidates[0]
+    doc, source_type = find_primary_document(classifications)
+    return doc
 
 
 def extract_avis_only(
@@ -1052,14 +1151,25 @@ def extract_avis_only(
     return extract_full_document(avis_info.filename, file_bytes, avis_info.is_scanned)
 
 
-def process_tender_zip(zip_files: Dict[str, io.BytesIO]) -> Tuple[Optional[ExtractionResult], List[FirstPageResult]]:
+def process_tender_zip(
+    zip_files: Dict[str, io.BytesIO],
+    tender_reference: Optional[str] = None
+) -> Tuple[Optional[ExtractionResult], List[FirstPageResult], str]:
     """
     MAIN WORKFLOW: Process a tender ZIP file.
     
     1. Classify all documents (first-page scan)
-    2. Find Avis de Consultation
-    3. Extract full Avis content
-    4. Return (avis_extraction, all_classifications)
+    2. Find primary document (Avis preferred, CPS as fallback)
+    3. Extract full content of primary document
+    4. Return (extraction_result, all_classifications, source_type)
+    
+    Args:
+        zip_files: Dictionary of filename -> file bytes
+        tender_reference: Optional tender reference to help detect multi-tender Avis
+    
+    Returns:
+        Tuple of (extraction_result, classifications, source_type)
+        source_type is "AVIS" or "CPS"
     
     Classifications are returned for logging/debugging but their first_page_text
     should be discarded after processing.
@@ -1074,22 +1184,32 @@ def process_tender_zip(zip_files: Dict[str, io.BytesIO]) -> Tuple[Optional[Extra
         scanned = " [SCANNED]" if c.is_scanned else ""
         logger.info(f"  {status} {c.filename} → {c.document_type.value}{scanned}")
     
-    # Step 2: Find Avis
-    logger.info("Phase 2: Locating Avis document...")
-    avis_info = find_avis_document(classifications)
+    # Step 2: Find primary document (Avis or CPS fallback)
+    logger.info("Phase 2: Locating primary document (Avis or CPS)...")
+    primary_doc, source_type = find_primary_document(classifications, tender_reference)
     
-    if not avis_info:
-        return None, classifications
+    if not primary_doc:
+        return None, classifications, ""
     
-    # Step 3: Full extraction of Avis only
-    logger.info("Phase 3: Full extraction of Avis...")
-    avis_extraction = extract_avis_only(zip_files, avis_info)
+    # Step 3: Full extraction of primary document
+    logger.info(f"Phase 3: Full extraction of {source_type}...")
+    
+    if primary_doc.filename not in zip_files:
+        logger.error(f"Primary document not found in ZIP: {primary_doc.filename}")
+        return None, classifications, ""
+    
+    file_bytes = zip_files[primary_doc.filename]
+    extraction = extract_full_document(primary_doc.filename, file_bytes, primary_doc.is_scanned)
+    
+    # Update document type based on source
+    if extraction and source_type == "CPS":
+        extraction.document_type = DocumentType.CPS
     
     # Clear first-page texts from memory (they're no longer needed)
     for c in classifications:
         c.first_page_text = ""  # Discard
     
-    return avis_extraction, classifications
+    return extraction, classifications, source_type
 
 
 # ============================

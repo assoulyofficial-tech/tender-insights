@@ -200,28 +200,40 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                 
                 # NEW WORKFLOW:
                 # 1. Classify all documents (first-page scan)
-                # 2. Find Avis document
-                # 3. Extract FULL content of Avis ONLY
+                # 2. Find primary document (Avis preferred, CPS as fallback)
+                # 3. Extract FULL content of primary document ONLY
                 files = result.get_files()
-                avis_extraction, classifications = process_tender_zip(files)
+                tender_ref = web_meta.reference_tender if web_meta else None
+                primary_extraction, classifications, source_type = process_tender_zip(files, tender_ref)
                 
-                # Store only the Avis document (not all files)
-                if avis_extraction and avis_extraction.success:
+                # Store only the primary document (Avis or CPS fallback)
+                if primary_extraction and primary_extraction.success:
                     doc = TenderDocument(
                         tender_id=tender.id,
-                        document_type=DocumentType(avis_extraction.document_type.value),
-                        filename=avis_extraction.filename,
-                        raw_text=avis_extraction.text,
-                        page_count=avis_extraction.page_count,
-                        extraction_method=avis_extraction.extraction_method.value,
-                        file_size_bytes=avis_extraction.file_size_bytes,
-                        mime_type=avis_extraction.mime_type
+                        document_type=DocumentType(primary_extraction.document_type.value),
+                        filename=primary_extraction.filename,
+                        raw_text=primary_extraction.text,
+                        page_count=primary_extraction.page_count,
+                        extraction_method=primary_extraction.extraction_method.value,
+                        file_size_bytes=primary_extraction.file_size_bytes,
+                        mime_type=primary_extraction.mime_type
                     )
                     db.add(doc)
                     
-                    # Run AI extraction on Avis
-                    metadata = ai_service.extract_avis_metadata(avis_extraction.text)
+                    # Run AI extraction on primary document
+                    metadata = ai_service.extract_avis_metadata(primary_extraction.text)
                     if metadata:
+                        # Update source_document fields to reflect actual source
+                        if source_type == "CPS":
+                            for key in metadata:
+                                if isinstance(metadata[key], dict) and "source_document" in metadata[key]:
+                                    metadata[key]["source_document"] = "CPS"
+                                elif isinstance(metadata[key], dict):
+                                    # Handle nested dicts like submission_deadline
+                                    for subkey in metadata[key]:
+                                        if isinstance(metadata[key][subkey], dict) and "source_document" in metadata[key][subkey]:
+                                            metadata[key][subkey]["source_document"] = "CPS"
+                        
                         # WEBSITE METADATA OVERRIDE (Authoritative)
                         # Reference, deadline, and subject from website take priority
                         if web_meta:
@@ -261,7 +273,7 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
                         tender.error_message = "AI extraction failed"
                 else:
                     tender.status = TenderStatus.ERROR
-                    tender.error_message = "No Avis document found in ZIP"
+                    tender.error_message = "No Avis or CPS document found in ZIP"
                 
                 db.commit()
                 extracted_count += 1
