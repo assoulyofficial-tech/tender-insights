@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { api } from '@/lib/api';
-import type { Tender, TenderLot, TenderItem, UniversalMetadata, AvisMetadata, LotDeepData } from '@/types/tender';
+import type { Tender, TenderLot, TenderItem, UniversalMetadata, AvisMetadata, LotDeepData, WebsiteExtendedMetadata, StructuredContact } from '@/types/tender';
 
 // Merged lot with both avis and deep data
 interface MergedLot extends TenderLot {
@@ -342,7 +342,7 @@ export default function TenderDetail() {
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">
-              {/* Left column - Basic Info (from Avis) */}
+              {/* Left column - Basic Info (from Avis + Website) */}
               <div className="data-card">
                 <h3 className="font-medium mb-4">Basic Information</h3>
                 <MetadataField 
@@ -360,6 +360,14 @@ export default function TenderDetail() {
                   value={avisMetadata?.issuing_institution?.value} 
                   source={avisMetadata?.issuing_institution?.source_document}
                 />
+                {/* Website extended: Acheteur Public */}
+                {avisMetadata?.website_extended?.acheteur_public && (
+                  <MetadataField 
+                    label="Acheteur Public" 
+                    value={avisMetadata.website_extended.acheteur_public.value} 
+                    source={avisMetadata.website_extended.acheteur_public.source_document}
+                  />
+                )}
                 {hasDeepData && universalMetadata?.institution_address && (
                   <MetadataField 
                     label="Institution Address" 
@@ -372,11 +380,27 @@ export default function TenderDetail() {
                   value={avisMetadata?.folder_opening_location?.value} 
                   source={avisMetadata?.folder_opening_location?.source_document}
                 />
+                {/* Website extended: Lieu d'exécution */}
+                {avisMetadata?.website_extended?.lieu_execution && (
+                  <MetadataField 
+                    label="Lieu d'exécution" 
+                    value={avisMetadata.website_extended.lieu_execution.value} 
+                    source={avisMetadata.website_extended.lieu_execution.source_document}
+                  />
+                )}
+                {/* Website extended: Lieu ouverture plis */}
+                {avisMetadata?.website_extended?.lieu_ouverture_plis && (
+                  <MetadataField 
+                    label="Lieu d'ouverture des plis" 
+                    value={avisMetadata.website_extended.lieu_ouverture_plis.value} 
+                    source={avisMetadata.website_extended.lieu_ouverture_plis.source_document}
+                  />
+                )}
               </div>
 
-              {/* Right column - Submission Details (from Avis) */}
+              {/* Right column - Submission & Financial Details */}
               <div className="data-card">
-                <h3 className="font-medium mb-4">Submission Details</h3>
+                <h3 className="font-medium mb-4">Submission & Financial Details</h3>
                 <MetadataField 
                   label="Deadline Date" 
                   value={avisMetadata?.submission_deadline?.date?.value} 
@@ -388,7 +412,7 @@ export default function TenderDetail() {
                   source={avisMetadata?.submission_deadline?.time?.source_document}
                 />
                 <MetadataField 
-                  label="Estimated Value" 
+                  label="Estimated Value (Document)" 
                   value={avisMetadata?.total_estimated_value?.value} 
                   source={avisMetadata?.total_estimated_value?.source_document}
                 />
@@ -398,8 +422,47 @@ export default function TenderDetail() {
                     value={avisMetadata.total_estimated_value.currency} 
                   />
                 )}
+                {/* Website extended: Estimation TTC */}
+                {avisMetadata?.website_extended?.estimation_ttc && (
+                  <MetadataField 
+                    label="Estimation (DHS TTC)" 
+                    value={avisMetadata.website_extended.estimation_ttc.value} 
+                    source={avisMetadata.website_extended.estimation_ttc.source_document}
+                  />
+                )}
+                {/* Website extended: Caution Provisoire */}
+                {avisMetadata?.website_extended?.caution_provisoire_website && (
+                  <MetadataField 
+                    label="Caution Provisoire (Website)" 
+                    value={avisMetadata.website_extended.caution_provisoire_website.value} 
+                    source={avisMetadata.website_extended.caution_provisoire_website.source_document}
+                  />
+                )}
               </div>
             </div>
+
+            {/* Contact Administratif (from Website - raw, or structured from Universal) */}
+            {(avisMetadata?.website_extended?.contact_administratif || universalMetadata?.structured_contact) && (
+              <div className="data-card">
+                <h3 className="font-medium mb-4">Contact Administratif</h3>
+                {universalMetadata?.structured_contact ? (
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <MetadataField label="Name" value={universalMetadata.structured_contact.name} />
+                    <MetadataField label="Role" value={universalMetadata.structured_contact.role} />
+                    <MetadataField label="Phone" value={universalMetadata.structured_contact.phone} />
+                    <MetadataField label="Email" value={universalMetadata.structured_contact.email} />
+                    <MetadataField label="Address" value={universalMetadata.structured_contact.address} />
+                  </div>
+                ) : avisMetadata?.website_extended?.contact_administratif && (
+                  <div>
+                    <p className="text-sm whitespace-pre-wrap">{avisMetadata.website_extended.contact_administratif.value}</p>
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Source: <span className="font-mono">WEBSITE</span> (will be structured after deep analysis)
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Subject (from Avis) */}
             <div className="data-card">

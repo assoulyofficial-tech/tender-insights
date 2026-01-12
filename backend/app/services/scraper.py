@@ -44,6 +44,13 @@ class WebsiteMetadata:
     submission_deadline_date: Optional[str] = None  # DD/MM/YYYY
     submission_deadline_time: Optional[str] = None  # HH:MM
     subject: Optional[str] = None
+    # Extended metadata (from expanded panel)
+    acheteur_public: Optional[str] = None  # Buyer/purchasing entity
+    lieu_execution: Optional[str] = None  # Execution location
+    estimation_ttc: Optional[str] = None  # Estimated value in DHS TTC
+    lieu_ouverture_plis: Optional[str] = None  # Bid opening location
+    caution_provisoire: Optional[str] = None  # Provisional guarantee
+    contact_administratif: Optional[str] = None  # Administrative contact (raw text)
 
 
 @dataclass
@@ -203,19 +210,38 @@ class TenderScraper:
         Extract metadata directly from tender HTML page (page de consultation).
         This data is AUTHORITATIVE and overrides document values.
         
+        Clicks on expansion button to reveal additional data before extraction.
+        
         HTML selectors:
         - Reference: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference
         - Deadline: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_dateHeureLimiteRemisePlis
         - Subject: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_objet
+        - Acheteur public: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_entiteAchat
+        - Lieu d'exécution: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_lieuxExecutions
+        - Estimation: span containing class 'content-bloc' in estimation section
+        - Lieu ouverture plis: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_lieuOuverturePlis
+        - Caution provisoire: span#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_cautionProvisoire
+        - Contact administratif: extracted from contact section
         """
         metadata = WebsiteMetadata()
         
         try:
+            # First, click the expansion button to reveal hidden data
+            try:
+                expand_button = await page.query_selector('a.title-toggle[onclick*="infosPrincipales"]')
+                if expand_button:
+                    await expand_button.click()
+                    # Wait for expansion animation
+                    await page.wait_for_timeout(500)
+                    logger.debug("Clicked expansion button for additional metadata")
+            except Exception as e:
+                logger.debug(f"Could not click expansion button: {e}")
+            
             # Extract reference
             ref_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference'
             ref_element = await page.query_selector(ref_selector)
             if ref_element:
-                metadata.reference_tender = await ref_element.inner_text()
+                metadata.reference_tender = (await ref_element.inner_text()).strip()
                 logger.debug(f"Extracted reference: {metadata.reference_tender}")
             
             # Extract deadline (format: DD/MM/YYYY HH:MM)
@@ -236,8 +262,76 @@ class TenderScraper:
             subject_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_objet'
             subject_element = await page.query_selector(subject_selector)
             if subject_element:
-                metadata.subject = await subject_element.inner_text()
+                metadata.subject = (await subject_element.inner_text()).strip()
                 logger.debug(f"Extracted subject: {metadata.subject[:100] if metadata.subject else 'None'}...")
+            
+            # === EXTENDED METADATA (from expanded panel) ===
+            
+            # Acheteur public (buyer/purchasing entity)
+            acheteur_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_entiteAchat'
+            acheteur_element = await page.query_selector(acheteur_selector)
+            if acheteur_element:
+                metadata.acheteur_public = (await acheteur_element.inner_text()).strip()
+                logger.debug(f"Extracted acheteur_public: {metadata.acheteur_public}")
+            
+            # Lieu d'exécution (execution location)
+            lieu_exec_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_lieuxExecutions'
+            lieu_exec_element = await page.query_selector(lieu_exec_selector)
+            if lieu_exec_element:
+                metadata.lieu_execution = (await lieu_exec_element.inner_text()).strip()
+                logger.debug(f"Extracted lieu_execution: {metadata.lieu_execution}")
+            
+            # Estimation (en Dhs TTC) - look for the content-bloc span
+            estimation_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_idReferentielZoneText_RepeaterReferentielZoneText_ctl0_labelReferentielZoneText'
+            estimation_element = await page.query_selector(estimation_selector)
+            if estimation_element:
+                metadata.estimation_ttc = (await estimation_element.inner_text()).strip()
+                logger.debug(f"Extracted estimation_ttc: {metadata.estimation_ttc}")
+            
+            # Lieu d'ouverture des plis (bid opening location)
+            lieu_ouv_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_lieuOuverturePlis'
+            lieu_ouv_element = await page.query_selector(lieu_ouv_selector)
+            if lieu_ouv_element:
+                metadata.lieu_ouverture_plis = (await lieu_ouv_element.inner_text()).strip()
+                logger.debug(f"Extracted lieu_ouverture_plis: {metadata.lieu_ouverture_plis}")
+            
+            # Caution provisoire (provisional guarantee)
+            caution_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_cautionProvisoire'
+            caution_element = await page.query_selector(caution_selector)
+            if caution_element:
+                metadata.caution_provisoire = (await caution_element.inner_text()).strip()
+                logger.debug(f"Extracted caution_provisoire: {metadata.caution_provisoire}")
+            
+            # Contact Administratif - extract the contact section content
+            try:
+                # Try to find the contact section by looking for elements containing contact info
+                contact_section = await page.evaluate('''() => {
+                    // Find the contact section - typically near the bottom of the expanded panel
+                    const labels = document.querySelectorAll('span[class*="label"], div[class*="label"]');
+                    for (const label of labels) {
+                        if (label.textContent && label.textContent.includes('Contact')) {
+                            // Get the parent row and extract all text from the value section
+                            const parent = label.closest('div[class*="row"], div[class*="bloc"]');
+                            if (parent) {
+                                const valueSpans = parent.querySelectorAll('span:not([class*="label"])');
+                                const texts = [];
+                                for (const span of valueSpans) {
+                                    const text = span.textContent.trim();
+                                    if (text && text.length > 0) {
+                                        texts.push(text);
+                                    }
+                                }
+                                return texts.join(' | ');
+                            }
+                        }
+                    }
+                    return null;
+                }''')
+                if contact_section:
+                    metadata.contact_administratif = contact_section.strip()
+                    logger.debug(f"Extracted contact_administratif: {metadata.contact_administratif[:100] if metadata.contact_administratif else 'None'}...")
+            except Exception as e:
+                logger.debug(f"Could not extract contact info: {e}")
                 
         except Exception as e:
             logger.warning(f"Failed to extract website metadata: {e}")

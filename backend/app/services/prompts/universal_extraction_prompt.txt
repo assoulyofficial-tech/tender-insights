@@ -57,6 +57,7 @@ Tu dois extraire UNIQUEMENT ces champs:
    - **execution_delay**: Délai d'exécution (valeur + unité: jours/mois)
    - **items**: Liste des articles du lot avec détails techniques
 3. **additional_conditions**: Conditions additionnelles (qualification, documents requis, garantie, paiement)
+4. **structured_contact**: Structuration des informations de contact administratif (si fourni dans le contexte)
 
 ## RÈGLES D'EXTRACTION DES ARTICLES
 
@@ -109,9 +110,24 @@ Pour chaque article dans un lot:
     "required_documents": ["<liste des documents requis>"],
     "warranty_period": "<durée ou null>",
     "payment_terms": "<conditions ou null>"
+  },
+  "structured_contact": {
+    "name": "<nom complet de la personne de contact ou null>",
+    "role": "<fonction/poste ou null>",
+    "phone": "<numéro de téléphone ou null>",
+    "email": "<adresse email ou null>",
+    "address": "<adresse de contact ou null>"
   }
 }
 ```
+
+## RÈGLES DE STRUCTURATION DU CONTACT
+
+Si le contexte contient un texte brut de "contact_administratif" extrait du site web:
+- Parse ce texte pour en extraire les composants structurés
+- Identifie le nom, le rôle/poste, le téléphone, l'email et l'adresse
+- Si une information n'est pas présente dans le texte -> null
+- Préserve les numéros de téléphone dans leur format original
 
 ## RÈGLES DE CALCUL (STRICTES)
 

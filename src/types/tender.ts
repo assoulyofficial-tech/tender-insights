@@ -39,6 +39,16 @@ export interface TenderKeywords {
   keywords_ar: string[];
 }
 
+// Website-scraped extended metadata (authoritative)
+export interface WebsiteExtendedMetadata {
+  acheteur_public: TrackedValue<string>;  // Buyer/purchasing entity
+  lieu_execution: TrackedValue<string>;   // Execution location
+  estimation_ttc: TrackedValue<string>;   // Estimated value DHS TTC
+  lieu_ouverture_plis: TrackedValue<string>; // Bid opening location
+  caution_provisoire_website: TrackedValue<string>; // Provisional guarantee from website
+  contact_administratif: TrackedValue<string>; // Raw contact info to be structured by AI
+}
+
 // Avis metadata schema (Phase 1 - Night Shift)
 export interface AvisMetadata {
   reference_tender: TrackedValue<string>;
@@ -53,6 +63,8 @@ export interface AvisMetadata {
   total_estimated_value: TrackedValue<string> & { currency?: string | null };
   lots: TenderLot[];
   keywords: TenderKeywords;
+  // Website extended metadata (authoritative)
+  website_extended?: WebsiteExtendedMetadata;
 }
 
 // Deep analysis data for a lot (complementary to AvisMetadata)
@@ -71,6 +83,15 @@ export interface LotDeepData {
   items: TenderItem[];
 }
 
+// Structured contact info (AI-parsed from raw contact text)
+export interface StructuredContact {
+  name: string | null;
+  role: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+}
+
 // Additional conditions from deep analysis
 export interface AdditionalConditions {
   qualification_criteria: string | null;
@@ -81,10 +102,13 @@ export interface AdditionalConditions {
 
 // Universal fields schema (Phase 2 - User Shift)
 // Contains ONLY complementary data not in AvisMetadata
+
 export interface UniversalMetadata {
   institution_address: TrackedValue<string>;
   lots_deep_data: LotDeepData[];
   additional_conditions: AdditionalConditions;
+  // AI-structured contact from website raw text
+  structured_contact?: StructuredContact;
 }
 
 // Document extracted from tender
