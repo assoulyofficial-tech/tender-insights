@@ -9,21 +9,21 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 from uuid import UUID
 
 from app.core.database import get_db
 from app.models import Tender, TenderDocument, ScraperJob, TenderStatus, DocumentType as ModelDocumentType
-from app.services.scraper import TenderScraper, ScraperProgress, WebsiteMetadata
+from app.services.scraper import TenderScraper, ScraperProgress, WebsiteMetadata, DownloadedTender
 from app.services.extractor import (
     DocumentType as ExtractorDocumentType,
-    extract_best_documents_for_phase1,
+    extract_best_documents_for_phase1_lazy,
     ExtractionResult,
     ExtractionMethod,
 )
-from app.services.phase1_merge import merge_phase1_metadata
+from app.services.phase1_merge import merge_phase1_metadata, is_metadata_complete
 from app.services.ai_pipeline import ai_service
 
 router = APIRouter()
@@ -154,10 +154,11 @@ def _run_scraper_sync(job_id: str, start_date: str, end_date: str):
 
 
 async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
-    """Async scraper logic"""
+    """Async scraper logic with LAZY DOWNLOAD + LAZY OCR optimization"""
     global _scraper_instance
     
     from app.core.database import SessionLocal
+    from loguru import logger
     db = SessionLocal()
     
     try:
@@ -186,10 +187,10 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
             db.commit()
             return
         
-        # Process downloads using website-first + AVIS→RC→CPS fallback workflow
+        # Process downloads using website-first + LAZY fallback workflow
         extracted_count = 0
         for result in results:
-            if not (result.success and result.zip_bytes):
+            if not result.success:
                 continue
 
             web_meta = result.website_metadata
@@ -204,81 +205,95 @@ async def _run_scraper_async(job_id: str, start_date: str, end_date: str):
             db.commit()
             db.refresh(tender)
 
-            files = result.get_files()
+            merged_metadata = None
             tender_ref = web_meta.reference_tender if web_meta else None
 
-            # Extract best candidate documents for Phase-1 fallbacks
-            extractions, _classifications = extract_best_documents_for_phase1(files, tender_ref)
-
-            # Choose one document to store (for later deep analysis / Q&A)
-            doc_to_store = (
-                extractions.get(ExtractorDocumentType.AVIS)
-                or extractions.get(ExtractorDocumentType.RC)
-                or extractions.get(ExtractorDocumentType.CPS)
-            )
-
-            if doc_to_store and doc_to_store.success:
-                db_doc = TenderDocument(
-                    tender_id=tender.id,
-                    document_type=ModelDocumentType(doc_to_store.document_type.value),
-                    filename=doc_to_store.filename,
-                    raw_text=doc_to_store.text,
-                    page_count=doc_to_store.page_count,
-                    extraction_method=ModelDocumentType.DIGITAL.value if False else doc_to_store.extraction_method.value,
-                    file_size_bytes=doc_to_store.file_size_bytes,
-                    mime_type=doc_to_store.mime_type,
+            # 1) WEBSITE (consultation text) first - always try this
+            if web_meta and web_meta.consultation_text:
+                logger.info(f"Extracting from WEBSITE for {tender_ref or tender.id}")
+                website_metadata = ai_service.extract_primary_metadata(
+                    web_meta.consultation_text,
+                    source_label="WEBSITE",
                 )
-                db.add(db_doc)
-
-                merged_metadata = None
-
-                # 1) WEBSITE (consultation text) first
-                if web_meta and web_meta.consultation_text:
-                    website_metadata = ai_service.extract_primary_metadata(
-                        web_meta.consultation_text,
-                        source_label="WEBSITE",
+                merged_metadata = website_metadata
+            
+            # 2) Check if we need document fallback
+            needs_fallback = not is_metadata_complete(merged_metadata)
+            
+            if needs_fallback and result.zip_bytes:
+                logger.info(f"Website data incomplete, using document fallbacks for {tender_ref or tender.id}")
+                files = result.get_files()
+                
+                # Extract documents with LAZY OCR (classify first, OCR only when needed)
+                extractions, _classifications = extract_best_documents_for_phase1_lazy(
+                    files, 
+                    tender_ref,
+                    current_metadata=merged_metadata  # Pass current state to know what's missing
+                )
+                
+                # Store the best document for later deep analysis
+                doc_to_store = (
+                    extractions.get(ExtractorDocumentType.AVIS)
+                    or extractions.get(ExtractorDocumentType.RC)
+                    or extractions.get(ExtractorDocumentType.CPS)
+                )
+                
+                if doc_to_store and doc_to_store.success:
+                    db_doc = TenderDocument(
+                        tender_id=tender.id,
+                        document_type=ModelDocumentType(doc_to_store.document_type.value),
+                        filename=doc_to_store.filename,
+                        raw_text=doc_to_store.text,
+                        page_count=doc_to_store.page_count,
+                        extraction_method=doc_to_store.extraction_method.value,
+                        file_size_bytes=doc_to_store.file_size_bytes,
+                        mime_type=doc_to_store.mime_type,
                     )
-                    merged_metadata = website_metadata
+                    db.add(db_doc)
 
-                # 2) AVIS → RC → CPS fallbacks
+                # AVIS → RC → CPS fallbacks (stop when complete)
                 for label, dt in [
                     ("AVIS", ExtractorDocumentType.AVIS),
                     ("RC", ExtractorDocumentType.RC),
                     ("CPS", ExtractorDocumentType.CPS),
                 ]:
+                    if is_metadata_complete(merged_metadata):
+                        logger.info(f"All fields complete, stopping fallback at {label}")
+                        break
+                        
                     ext = extractions.get(dt)
                     if ext and ext.success and ext.text:
+                        logger.info(f"Merging from {label} for {tender_ref or tender.id}")
                         fb = ai_service.extract_primary_metadata(ext.text, source_label=label)
                         merged_metadata = merge_phase1_metadata(merged_metadata, fb)
 
-                if merged_metadata:
-                    # Persist website contact raw so Phase-2 can structure it
-                    if web_meta and web_meta.contact_administratif:
-                        merged_metadata.setdefault("website_extended", {})
-                        merged_metadata["website_extended"]["contact_administratif"] = {
-                            "value": web_meta.contact_administratif,
-                            "source_document": "WEBSITE",
-                            "source_date": None,
-                        }
+            elif needs_fallback and not result.zip_bytes:
+                logger.warning(f"Website incomplete but no ZIP available for {tender_ref or tender.id}")
 
-                    # Ensure tender.external_reference aligns with extracted reference when available
-                    ref_val = None
-                    if isinstance(merged_metadata.get("reference_tender"), dict):
-                        ref_val = merged_metadata["reference_tender"].get("value")
-                    if ref_val:
-                        tender.external_reference = ref_val
-                    elif web_meta and web_meta.reference_tender:
-                        tender.external_reference = web_meta.reference_tender
+            if merged_metadata:
+                # Persist website contact raw so Phase-2 can structure it
+                if web_meta and web_meta.contact_administratif:
+                    merged_metadata.setdefault("website_extended", {})
+                    merged_metadata["website_extended"]["contact_administratif"] = {
+                        "value": web_meta.contact_administratif,
+                        "source_document": "WEBSITE",
+                        "source_date": None,
+                    }
 
-                    tender.avis_metadata = merged_metadata
-                    tender.status = TenderStatus.LISTED
-                else:
-                    tender.status = TenderStatus.ERROR
-                    tender.error_message = "Phase 1 extraction failed (website + AVIS/RC/CPS)"
+                # Ensure tender.external_reference aligns with extracted reference when available
+                ref_val = None
+                if isinstance(merged_metadata.get("reference_tender"), dict):
+                    ref_val = merged_metadata["reference_tender"].get("value")
+                if ref_val:
+                    tender.external_reference = ref_val
+                elif web_meta and web_meta.reference_tender:
+                    tender.external_reference = web_meta.reference_tender
 
+                tender.avis_metadata = merged_metadata
+                tender.status = TenderStatus.LISTED
             else:
                 tender.status = TenderStatus.ERROR
-                tender.error_message = "No AVIS/RC/CPS document found in ZIP"
+                tender.error_message = "Phase 1 extraction failed (website + documents)"
 
             db.commit()
             extracted_count += 1
