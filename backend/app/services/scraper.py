@@ -290,15 +290,48 @@ class TenderScraper:
                         await lot_detail_btn.click()
                     
                     # Wait for popup/modal to appear
-                    await page.wait_for_timeout(2000)
-                    logger.info("Waited 2s after clicking Détail des lots")
+                    await page.wait_for_timeout(3000)
+                    logger.info("Waited 3s after clicking Détail des lots")
                     
                     # Take screenshot for debugging
                     try:
-                        await page.screenshot(path="/tmp/lots_popup_debug.png")
+                        await page.screenshot(path="/tmp/lots_popup_debug.png", full_page=True)
                         logger.info("Saved debug screenshot to /tmp/lots_popup_debug.png")
                     except Exception as ss_err:
                         logger.debug(f"Could not save screenshot: {ss_err}")
+                    
+                    # DEBUG: Log all visible dialogs/overlays/modals
+                    try:
+                        visible_dialogs = await page.evaluate('''() => {
+                            const elements = document.querySelectorAll('div, table, iframe, [role="dialog"], .modal, .popup, .overlay');
+                            const visible = [];
+                            elements.forEach(el => {
+                                const style = window.getComputedStyle(el);
+                                const rect = el.getBoundingClientRect();
+                                if (style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 100 && rect.height > 100) {
+                                    const text = el.innerText || '';
+                                    if (text.toLowerCase().includes('lot') || el.className.includes('dialog') || el.className.includes('modal') || el.className.includes('popup')) {
+                                        visible.push({
+                                            tag: el.tagName,
+                                            id: el.id,
+                                            className: el.className,
+                                            textPreview: text.substring(0, 300)
+                                        });
+                                    }
+                                }
+                            });
+                            return visible.slice(0, 10);  // Limit to 10 elements
+                        }''')
+                        if visible_dialogs:
+                            logger.info(f"DEBUG: Found {len(visible_dialogs)} potential popup elements:")
+                            for elem in visible_dialogs:
+                                logger.info(f"  - <{elem['tag']}> id='{elem['id']}' class='{elem['className']}' text='{elem['textPreview'][:100]}...'")
+                    except Exception as debug_err:
+                        logger.debug(f"Could not debug visible elements: {debug_err}")
+                    
+                    # PAUSE for manual inspection (remove after debugging)
+                    logger.info(">>> PAUSING FOR MANUAL INSPECTION - close browser when done <<<")
+                    await page.pause()
                     
                     # Try multiple popup/modal selectors used by gov.ma site
                     popup_selectors = [
