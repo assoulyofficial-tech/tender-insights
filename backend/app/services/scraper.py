@@ -272,99 +272,109 @@ class TenderScraper:
             except Exception as e:
                 logger.debug(f"Could not click infosPrincipales toggle: {e}")
 
-            # Click on "Détail des lots" button if present (for multi-lot tenders)
-            # The button opens a POPUP WINDOW via popUp('url') - we extract URL and navigate directly
+            # Click on "Détail des lots" (multi-lot tenders)
+            # On this website the button usually triggers a JS popUp(...) that opens a small popup tab/window.
+            # We handle BOTH cases:
+            # 1) click and capture the popup via expect_popup()
+            # 2) derive the PopUpDetailLots URL from href/onclick and navigate directly
             try:
-                # Look for the picto-details image that triggers lot details popup
-                lot_detail_btn = page.locator('img[alt*="Détail des lots"], img[src*="picto-details"]').first
-                btn_count = await lot_detail_btn.count()
-                logger.info(f"Found {btn_count} 'Détail des lots' button(s)")
-                
-                if btn_count > 0:
-                    # Get the onclick attribute from the parent <a> element or the img itself
-                    onclick_attr = await page.evaluate('''() => {
-                        const img = document.querySelector('img[alt*="Détail des lots"], img[src*="picto-details"]');
-                        if (!img) return null;
-                        
-                        // Check parent elements for onclick
-                        let el = img;
-                        for (let i = 0; i < 3; i++) {
-                            if (el.onclick || el.getAttribute('onclick')) {
-                                return el.getAttribute('onclick') || el.onclick.toString();
-                            }
-                            if (el.href && el.href.includes('popUp')) {
-                                return el.href;
-                            }
-                            el = el.parentElement;
-                            if (!el) break;
-                        }
-                        return null;
-                    }''')
-                    
-                    logger.info(f"Found onclick attribute: {onclick_attr}")
-                    
-                    # Extract popup URL from popUp('url',...) pattern
-                    popup_url = None
-                    if onclick_attr and 'popUp' in onclick_attr:
-                        import re
-                        # Match popUp('url'...) or popUp("url"...)
-                        match = re.search(r"popUp\s*\(\s*['\"]([^'\"]+)['\"]", onclick_attr)
-                        if match:
-                            popup_url = match.group(1)
-                            # Clean up the URL
-                            popup_url = popup_url.replace("\\'", "'").replace('\\"', '"').replace('%27', "'")
-                            # Remove any trailing parameters added by the pattern
-                            if popup_url.endswith("'"):
-                                popup_url = popup_url[:-1]
-                            # Make it absolute if relative
-                            if not popup_url.startswith('http'):
-                                base_url = "https://www.marchespublics.gov.ma/"
-                                popup_url = base_url + popup_url
-                            logger.info(f"Extracted popup URL: {popup_url}")
-                    
-                    if popup_url:
-                        # Navigate to the popup URL in a new page context
-                        logger.info(f"Navigating to popup URL to scrape lot details...")
-                        popup_page = await page.context.new_page()
+                popup_clickable = None
+
+                # 1) Most reliable: find any <a> that references PopUpDetailLots
+                popup_link = page.locator(
+                    'a[onclick*="commun.PopUpDetailLots"], a[href*="commun.PopUpDetailLots"], '
+                    'a[onclick*="PopUpDetailLots"], a[href*="PopUpDetailLots"]'
+                ).first
+                if await popup_link.count() > 0:
+                    popup_clickable = popup_link
+
+                # 2) Fallback: the picto-details image ("Détail des lots")
+                if popup_clickable is None:
+                    img = page.locator('img[alt*="Détail des lots"], img[src*="picto-details"]').first
+                    if await img.count() > 0:
+                        a_parent = img.locator('xpath=ancestor::a[1]')
+                        popup_clickable = a_parent if await a_parent.count() > 0 else img
+
+                if popup_clickable is None:
+                    logger.debug("No lots popup trigger found on page")
+                else:
+                    popup_page = None
+
+                    # Try: click and capture the popup tab/window
+                    try:
+                        async with page.expect_popup(timeout=6000) as popup_info:
+                            await popup_clickable.click(force=True)
+                        popup_page = await popup_info.value
+                        logger.info("Lots popup opened via click (expect_popup)")
+                    except PlaywrightTimeout:
+                        logger.info("No popup event after click; will try direct navigation to PopUpDetailLots URL")
+                    except Exception as e:
+                        logger.debug(f"Popup click/expect_popup failed: {e}")
+
+                    # Fallback: derive popup URL from href/onclick (works even if click doesn't open a popup)
+                    if popup_page is None:
+                        href = await popup_clickable.get_attribute("href")
+                        onclick = await popup_clickable.get_attribute("onclick")
+                        attr = " ".join([s for s in [href, onclick] if s])
+
+                        popup_url = None
                         try:
-                            await popup_page.goto(popup_url, wait_until="networkidle", timeout=30000)
-                            await popup_page.wait_for_timeout(1500)
-                            
-                            # Take debug screenshot
+                            import re
+                            # popUp('index.php?page=commun.PopUpDetailLots...','yes')
+                            m = re.search(r"popUp\s*\(\s*['\"]([^'\"]+)['\"]", attr or "", re.IGNORECASE)
+                            if m:
+                                popup_url = m.group(1)
+                            else:
+                                # Sometimes the URL exists directly in href/onclick
+                                m2 = re.search(
+                                    r"(index\.php\?page=commun\.PopUpDetailLots[^'\"\s\)]*)",
+                                    attr or "",
+                                    re.IGNORECASE,
+                                )
+                                if m2:
+                                    popup_url = m2.group(1)
+                        except Exception as parse_err:
+                            logger.debug(f"Could not parse PopUpDetailLots URL from attributes: {parse_err}")
+
+                        if popup_url:
+                            from urllib.parse import urljoin
+                            popup_url = urljoin(page.url, popup_url)
+                            logger.info(f"Derived lots popup URL: {popup_url}")
+
+                            popup_page = await page.context.new_page()
+                            await popup_page.goto(popup_url, wait_until="domcontentloaded", timeout=30000)
+
+                    # Scrape popup text (if we got a page)
+                    if popup_page is not None:
+                        try:
+                            await popup_page.wait_for_load_state("domcontentloaded")
+                            await popup_page.wait_for_timeout(800)
+
+                            # Debug screenshot to verify the popup content is present
                             try:
                                 await popup_page.screenshot(path="/tmp/lots_popup_debug.png", full_page=True)
-                                logger.info("Saved popup screenshot to /tmp/lots_popup_debug.png")
+                                logger.info("Saved lots popup screenshot to /tmp/lots_popup_debug.png")
                             except Exception as ss_err:
-                                logger.debug(f"Could not save screenshot: {ss_err}")
-                            
-                            # Scrape the popup content
-                            popup_content = await popup_page.evaluate('''() => {
-                                const body = document.body;
-                                if (!body) return '';
-                                
-                                // Remove scripts and styles
-                                const toRemove = body.querySelectorAll('script, style, noscript');
-                                toRemove.forEach(s => s.remove());
-                                
-                                return body.innerText || body.textContent || '';
-                            }''')
-                            
-                            if popup_content and len(popup_content.strip()) > 50:
-                                metadata.lots_popup_text = popup_content.strip()
-                                logger.info(f"Successfully scraped {len(metadata.lots_popup_text)} chars from lots popup")
-                                logger.debug(f"Popup content preview: {metadata.lots_popup_text[:500]}...")
+                                logger.debug(f"Could not save popup screenshot: {ss_err}")
+
+                            popup_text = ""
+                            try:
+                                popup_text = (await popup_page.inner_text("body")).strip()
+                            except Exception:
+                                popup_text = (await popup_page.evaluate("() => document.body?.innerText || ''")).strip()
+
+                            if popup_text and len(popup_text) > 50:
+                                metadata.lots_popup_text = popup_text
+                                logger.info(f"Successfully scraped {len(popup_text)} chars from lots popup")
                             else:
-                                logger.warning("Popup page had no meaningful content")
-                                
-                        except Exception as popup_nav_err:
-                            logger.warning(f"Failed to navigate to popup URL: {popup_nav_err}")
+                                logger.warning("Lots popup had no meaningful text")
                         finally:
-                            await popup_page.close()
-                    else:
-                        logger.warning("Could not extract popup URL from onclick attribute")
-                else:
-                    logger.debug("No 'Détail des lots' button found on page")
-                    
+                            # Always close the popup page to avoid leaking tabs
+                            try:
+                                await popup_page.close()
+                            except Exception:
+                                pass
+
             except Exception as lots_err:
                 logger.debug(f"Error processing Détail des lots: {lots_err}")
 
@@ -378,11 +388,16 @@ class TenderScraper:
                     metadata.consultation_text = (await page.inner_text('body')).strip()
             except Exception as e:
                 logger.debug(f"Could not capture consultation_text: {e}")
-            
-            # Append lots popup text to consultation text if available
+
+            # IMPORTANT: Put lots text near the TOP so it doesn't get truncated by the AI 20k char limit.
             if metadata.lots_popup_text:
-                metadata.consultation_text = (metadata.consultation_text or "") + "\n\n=== DÉTAIL DES LOTS ===\n" + metadata.lots_popup_text
-            
+                metadata.consultation_text = (
+                    "=== DÉTAIL DES LOTS ===\n"
+                    + metadata.lots_popup_text
+                    + "\n\n=== PAGE DE CONSULTATION ===\n"
+                    + (metadata.consultation_text or "")
+                )
+
             # Extract reference
             ref_selector = '#ctl0_CONTENU_PAGE_idEntrepriseConsultationSummary_reference'
             ref_element = await page.query_selector(ref_selector)
