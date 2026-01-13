@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = "deepseek-chat"
     
     # Scraper Configuration
-    SCRAPER_HEADLESS: bool = True
+    SCRAPER_HEADLESS: bool = False  # TEMP: Disabled for debugging popup click
     SCRAPER_MAX_CONCURRENT: int = 5
     SCRAPER_RETRY_ATTEMPTS: int = 3
     SCRAPER_TIMEOUT_PAGE: int = 30000  # ms
