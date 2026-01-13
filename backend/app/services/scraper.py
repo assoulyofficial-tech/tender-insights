@@ -273,161 +273,100 @@ class TenderScraper:
                 logger.debug(f"Could not click infosPrincipales toggle: {e}")
 
             # Click on "Détail des lots" button if present (for multi-lot tenders)
+            # The button opens a POPUP WINDOW via popUp('url') - we extract URL and navigate directly
             try:
-                # Look for the picto-details image (can be inside an <a> or standalone)
+                # Look for the picto-details image that triggers lot details popup
                 lot_detail_btn = page.locator('img[alt*="Détail des lots"], img[src*="picto-details"]').first
                 btn_count = await lot_detail_btn.count()
                 logger.info(f"Found {btn_count} 'Détail des lots' button(s)")
                 
                 if btn_count > 0:
-                    # Try clicking the parent <a> if exists, otherwise the img directly
-                    parent_link = page.locator('a:has(img[alt*="Détail des lots"]), a:has(img[src*="picto-details"])').first
-                    if await parent_link.count() > 0:
-                        logger.info("Clicking parent <a> of Détail des lots button...")
-                        await parent_link.click()
-                    else:
-                        logger.info("Clicking img directly for Détail des lots...")
-                        await lot_detail_btn.click()
-                    
-                    # Wait for popup/modal to appear
-                    await page.wait_for_timeout(3000)
-                    logger.info("Waited 3s after clicking Détail des lots")
-                    
-                    # Take screenshot for debugging
-                    try:
-                        await page.screenshot(path="/tmp/lots_popup_debug.png", full_page=True)
-                        logger.info("Saved debug screenshot to /tmp/lots_popup_debug.png")
-                    except Exception as ss_err:
-                        logger.debug(f"Could not save screenshot: {ss_err}")
-                    
-                    # DEBUG: Log all visible dialogs/overlays/modals
-                    try:
-                        visible_dialogs = await page.evaluate('''() => {
-                            const elements = document.querySelectorAll('div, table, iframe, [role="dialog"], .modal, .popup, .overlay');
-                            const visible = [];
-                            elements.forEach(el => {
-                                const style = window.getComputedStyle(el);
-                                const rect = el.getBoundingClientRect();
-                                if (style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 100 && rect.height > 100) {
-                                    const text = el.innerText || '';
-                                    if (text.toLowerCase().includes('lot') || el.className.includes('dialog') || el.className.includes('modal') || el.className.includes('popup')) {
-                                        visible.push({
-                                            tag: el.tagName,
-                                            id: el.id,
-                                            className: el.className,
-                                            textPreview: text.substring(0, 300)
-                                        });
-                                    }
-                                }
-                            });
-                            return visible.slice(0, 10);  // Limit to 10 elements
-                        }''')
-                        if visible_dialogs:
-                            logger.info(f"DEBUG: Found {len(visible_dialogs)} potential popup elements:")
-                            for elem in visible_dialogs:
-                                logger.info(f"  - <{elem['tag']}> id='{elem['id']}' class='{elem['className']}' text='{elem['textPreview'][:100]}...'")
-                    except Exception as debug_err:
-                        logger.debug(f"Could not debug visible elements: {debug_err}")
-                    
-                    # PAUSE for manual inspection (remove after debugging)
-                    logger.info(">>> PAUSING FOR MANUAL INSPECTION - close browser when done <<<")
-                    await page.pause()
-                    
-                    # Try multiple popup/modal selectors used by gov.ma site
-                    popup_selectors = [
-                        # jQuery UI Dialog (common on gov sites)
-                        '.ui-dialog',
-                        '.ui-dialog-content',
-                        '#dialog',
-                        '[aria-describedby]',
-                        # Bootstrap-style modals
-                        '.modal.show .modal-body',
-                        '.modal.in .modal-body',
-                        '.modal[style*="display: block"] .modal-body',
-                        # Fancybox
-                        '.fancybox-content',
-                        '.fancybox-inner',
-                        '#fancybox-content',
-                        # Generic
-                        '.popup-content',
-                        '.overlay-content',
-                        '[role="dialog"]',
-                        '.lightbox-content',
-                        # ASP.NET specific
-                        '#ctl0_CONTENU_PAGE_pnlDetailsLots',
-                        '[id*="DetailsLots"]',
-                        '[id*="detailsLots"]',
-                        '[id*="PopupLots"]',
-                        # Any visible overlay that appeared
-                        'div.ui-widget-overlay + div',
-                    ]
-                    
-                    for selector in popup_selectors:
-                        try:
-                            popup = page.locator(selector).first
-                            if await popup.count() > 0:
-                                await popup.wait_for(state='visible', timeout=1000)
-                                popup_text = (await popup.inner_text()).strip()
-                                if popup_text and len(popup_text) > 20:
-                                    metadata.lots_popup_text = popup_text
-                                    logger.info(f"Captured lots popup via '{selector}': {popup_text[:200]}...")
-                                    break
-                        except Exception as sel_err:
-                            logger.debug(f"Selector {selector} failed: {sel_err}")
-                            continue
-                    
-                    # Fallback: capture any new iframe content
-                    if not metadata.lots_popup_text:
-                        try:
-                            frames = page.frames
-                            for frame in frames:
-                                if frame != page.main_frame:
-                                    frame_text = await frame.locator('body').inner_text()
-                                    if frame_text and len(frame_text) > 50 and 'lot' in frame_text.lower():
-                                        metadata.lots_popup_text = frame_text.strip()
-                                        logger.info(f"Captured lots from iframe: {frame_text[:200]}...")
-                                        break
-                        except Exception as frame_err:
-                            logger.debug(f"Could not check iframes: {frame_err}")
-                    
-                    # Last resort: get all visible text and look for lot-related content
-                    if not metadata.lots_popup_text:
-                        try:
-                            full_page_text = await page.inner_text('body')
-                            # Look for section that contains lot details
-                            if 'lot' in full_page_text.lower():
-                                logger.info("Popup text not captured via selectors, will rely on full page text")
-                        except Exception:
-                            pass
-                    
-                    # Try to close the popup
-                    try:
-                        close_selectors = [
-                            '.ui-dialog-titlebar-close',
-                            'button.close',
-                            '.modal .close',
-                            '[aria-label="Close"]',
-                            '[aria-label="Fermer"]',
-                            '.fancybox-close',
-                            'a.close',
-                        ]
-                        for close_sel in close_selectors:
-                            close_btn = page.locator(close_sel).first
-                            if await close_btn.count() > 0:
-                                await close_btn.click()
-                                logger.info(f"Closed popup via {close_sel}")
-                                await page.wait_for_timeout(300)
-                                break
-                        else:
-                            # Press Escape to close
-                            await page.keyboard.press('Escape')
-                            await page.wait_for_timeout(300)
-                    except Exception:
-                        await page.keyboard.press('Escape')
-                        await page.wait_for_timeout(300)
+                    # Get the onclick attribute from the parent <a> element or the img itself
+                    onclick_attr = await page.evaluate('''() => {
+                        const img = document.querySelector('img[alt*="Détail des lots"], img[src*="picto-details"]');
+                        if (!img) return null;
                         
-            except Exception as e:
-                logger.warning(f"Could not click Détail des lots: {e}")
+                        // Check parent elements for onclick
+                        let el = img;
+                        for (let i = 0; i < 3; i++) {
+                            if (el.onclick || el.getAttribute('onclick')) {
+                                return el.getAttribute('onclick') || el.onclick.toString();
+                            }
+                            if (el.href && el.href.includes('popUp')) {
+                                return el.href;
+                            }
+                            el = el.parentElement;
+                            if (!el) break;
+                        }
+                        return null;
+                    }''')
+                    
+                    logger.info(f"Found onclick attribute: {onclick_attr}")
+                    
+                    # Extract popup URL from popUp('url',...) pattern
+                    popup_url = None
+                    if onclick_attr and 'popUp' in onclick_attr:
+                        import re
+                        # Match popUp('url'...) or popUp("url"...)
+                        match = re.search(r"popUp\s*\(\s*['\"]([^'\"]+)['\"]", onclick_attr)
+                        if match:
+                            popup_url = match.group(1)
+                            # Clean up the URL
+                            popup_url = popup_url.replace("\\'", "'").replace('\\"', '"').replace('%27', "'")
+                            # Remove any trailing parameters added by the pattern
+                            if popup_url.endswith("'"):
+                                popup_url = popup_url[:-1]
+                            # Make it absolute if relative
+                            if not popup_url.startswith('http'):
+                                base_url = "https://www.marchespublics.gov.ma/"
+                                popup_url = base_url + popup_url
+                            logger.info(f"Extracted popup URL: {popup_url}")
+                    
+                    if popup_url:
+                        # Navigate to the popup URL in a new page context
+                        logger.info(f"Navigating to popup URL to scrape lot details...")
+                        popup_page = await page.context.new_page()
+                        try:
+                            await popup_page.goto(popup_url, wait_until="networkidle", timeout=30000)
+                            await popup_page.wait_for_timeout(1500)
+                            
+                            # Take debug screenshot
+                            try:
+                                await popup_page.screenshot(path="/tmp/lots_popup_debug.png", full_page=True)
+                                logger.info("Saved popup screenshot to /tmp/lots_popup_debug.png")
+                            except Exception as ss_err:
+                                logger.debug(f"Could not save screenshot: {ss_err}")
+                            
+                            # Scrape the popup content
+                            popup_content = await popup_page.evaluate('''() => {
+                                const body = document.body;
+                                if (!body) return '';
+                                
+                                // Remove scripts and styles
+                                const toRemove = body.querySelectorAll('script, style, noscript');
+                                toRemove.forEach(s => s.remove());
+                                
+                                return body.innerText || body.textContent || '';
+                            }''')
+                            
+                            if popup_content and len(popup_content.strip()) > 50:
+                                metadata.lots_popup_text = popup_content.strip()
+                                logger.info(f"Successfully scraped {len(metadata.lots_popup_text)} chars from lots popup")
+                                logger.debug(f"Popup content preview: {metadata.lots_popup_text[:500]}...")
+                            else:
+                                logger.warning("Popup page had no meaningful content")
+                                
+                        except Exception as popup_nav_err:
+                            logger.warning(f"Failed to navigate to popup URL: {popup_nav_err}")
+                        finally:
+                            await popup_page.close()
+                    else:
+                        logger.warning("Could not extract popup URL from onclick attribute")
+                else:
+                    logger.debug("No 'Détail des lots' button found on page")
+                    
+            except Exception as lots_err:
+                logger.debug(f"Error processing Détail des lots: {lots_err}")
 
             # Capture consultation text (after expansion) for AI parsing
             try:
